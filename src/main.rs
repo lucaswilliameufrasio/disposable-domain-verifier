@@ -1,4 +1,10 @@
-use axum::{extract::{Query, State}, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,7 +29,7 @@ fn load_domains(path: &str) -> std::io::Result<HashSet<String>> {
 
 #[derive(Clone)]
 struct AppState {
-    domains: HashSet<String>
+    domains: HashSet<String>,
 }
 
 #[tokio::main]
@@ -38,14 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize DOMAINS once at startup
     let domains = load_domains(path)?;
-    let state = AppState {
-        domains,
-    };
+    let state = AppState { domains };
 
     let port = std::env::var("PORT").unwrap_or("9999".to_string());
 
     // Build application
-    let app = Router::new().route("/v1/domains/verify", get(verify_handler)).with_state(state);
+    let app = Router::new()
+        .route("/v1/domains/verify", get(verify_handler))
+        .with_state(state);
 
     // Run server on localhost:<port>
     let address = SocketAddr::from((IpAddr::from(Ipv6Addr::UNSPECIFIED), port.parse()?));
@@ -71,17 +77,23 @@ struct VerifyResponse {
     checked_at: String,
 }
 
-async fn verify_handler(State(state): State<AppState>, Query(params): Query<VerifyParams>) -> impl IntoResponse {
+async fn verify_handler(
+    State(state): State<AppState>,
+    Query(params): Query<VerifyParams>,
+) -> impl IntoResponse {
     let domain_orig = params.domain.clone();
     let domain = params.domain.to_lowercase();
     let now = Utc::now().to_rfc3339();
 
     let is_disposable = state.domains.contains(&domain);
 
-    (StatusCode::OK, Json(VerifyResponse {
-        domain: domain_orig,
-        is_disposable,
-        source: "assets/blocklist.txt".into(),
-        checked_at: now,
-    }))
+    (
+        StatusCode::OK,
+        Json(VerifyResponse {
+            domain: domain_orig,
+            is_disposable,
+            source: "assets/blocklist.txt".into(),
+            checked_at: now,
+        }),
+    )
 }
