@@ -1,4 +1,4 @@
-# Domain Verifier
+# Disposable Domain Verifier
 
 # Installation
 
