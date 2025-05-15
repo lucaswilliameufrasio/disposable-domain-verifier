@@ -1,12 +1,13 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{StatusCode, Uri},
     response::IntoResponse,
     routing::get,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
     collections::HashSet,
     fs::File,
@@ -51,7 +52,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build application
     let app = Router::new()
         .route("/v1/domains/verify", get(verify_handler))
-        .with_state(state);
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(|req: &axum::extract::Request<_>| {
+                    let ip = req
+                        .headers()
+                        .get("x-forwarded-for")
+                        .and_then(|header_value| header_value.to_str().ok())
+                        .and_then(|header_value| {
+                            header_value
+                                .split(',')
+                                .next()
+                                .map(str::trim)
+                                .map(str::to_string)
+                        })
+                        .or_else(|| {
+                            req.extensions()
+                                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                                .map(|ci| ci.0.ip().to_string())
+                        })
+                        .unwrap_or_else(|| "unknown".into());
+
+                    tracing::info_span!(
+                        "http-request",
+                        %ip,
+                        method = %req.method(),
+                        path = %req.uri().path(),
+                        level = %tracing::Level::INFO
+                    )
+                })
+                .on_response(
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
+                ),
+        )
+        .with_state(state)
+        .fallback(fallback_handler);
 
     // Run server on localhost:<port>
     let address = SocketAddr::from((IpAddr::from(Ipv6Addr::UNSPECIFIED), port.parse()?));
@@ -59,9 +94,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting server on {}", address);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
+}
+
+async fn fallback_handler(uri: Uri) -> impl IntoResponse {
+    tracing::error!("No route for {}", uri);
+    (
+        StatusCode::NOT_FOUND,
+        Json(
+            json!({ "message": format!("No route for {}", uri), "error_code": "ROUTE_NOT_FOUND" }),
+        ),
+    )
 }
 
 #[derive(Debug, Deserialize)]
