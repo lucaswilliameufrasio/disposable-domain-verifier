@@ -20,7 +20,7 @@ fn load_domains(path: &str) -> std::io::Result<HashSet<String>> {
     let reader = BufReader::new(file);
     let set = reader
         .lines()
-        .filter_map(Result::ok)
+        .map_while(Result::ok)
         .map(|line| line.trim().to_lowercase())
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .collect();
