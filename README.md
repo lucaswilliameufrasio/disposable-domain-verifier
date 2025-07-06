@@ -5,7 +5,7 @@
 1. Clone the repository:
 
 ``` bash
-git clone https://github.com/lucaswilliameufrasio/domain_verify_api.git
+git clone https://github.com/lucaswilliameufrasio/disposable-domain-verifier.git
 cd domain verifier
 ```
 
