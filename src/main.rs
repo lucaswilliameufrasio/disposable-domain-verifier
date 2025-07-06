@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build application
     let app = Router::new()
         .route("/v1/domains/verify", get(verify_handler))
+        .route("/health-check", get(health_check))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(|req: &axum::extract::Request<_>| {
@@ -111,6 +112,10 @@ async fn fallback_handler(uri: Uri) -> impl IntoResponse {
             json!({ "message": format!("No route for {}", uri), "error_code": "ROUTE_NOT_FOUND" }),
         ),
     )
+}
+
+async fn health_check() -> impl IntoResponse {
+    (StatusCode::OK, Json(json!({ "message": "ok" })))
 }
 
 #[derive(Debug, Deserialize)]
