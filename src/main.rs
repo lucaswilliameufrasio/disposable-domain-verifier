@@ -1,3 +1,9 @@
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+use arc_swap::ArcSwap;
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -11,12 +17,15 @@ use serde_json::json;
 use std::{
     collections::HashSet,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::Arc,
 };
 
-/// Helper to read domains.txt
-fn load_domains(path: &str) -> std::io::Result<HashSet<String>> {
+type DomainSet = HashSet<String, ahash::RandomState>;
+
+/// Helper to read domains from a file path
+fn load_domains_from_file(path: &str) -> std::io::Result<DomainSet> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let set = reader
@@ -30,27 +39,11 @@ fn load_domains(path: &str) -> std::io::Result<HashSet<String>> {
 
 #[derive(Clone)]
 struct AppState {
-    domains: HashSet<String>,
+    domains: Arc<ArcSwap<DomainSet>>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing subscriber (logging)
-    tracing_subscriber::fmt::init();
-
-    // Resolve path: <current_dir>/assets/blocklist.txt
-    let cwd = std::env::current_dir()?;
-    let path_buffer = cwd.join("assets").join("blocklist.txt");
-    let path = path_buffer.to_str().expect("Path not defined properly");
-
-    // Initialize DOMAINS once at startup
-    let domains = load_domains(path)?;
-    let state = AppState { domains };
-
-    let port = std::env::var("PORT").unwrap_or("9999".to_string());
-
-    // Build application
-    let app = Router::new()
+fn create_app(state: AppState) -> Router {
+    Router::new()
         .route("/v1/domains/verify", get(verify_handler))
         .route("/health-check", get(health_check))
         .layer(
@@ -87,19 +80,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
         )
         .with_state(state)
-        .fallback(fallback_handler);
+        .fallback(fallback_handler)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run().await
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing subscriber (logging)
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // Resolve path: <current_dir>/assets/blocklist.txt
+    let cwd = std::env::current_dir()?;
+    let path_buffer = cwd.join("assets").join("blocklist.txt");
+    let path = path_buffer.to_str().expect("Path not defined properly").to_string();
+
+    // Initialize with local file first for immediate availability
+    let initial_domains = load_domains_from_file(&path).unwrap_or_else(|e| {
+        tracing::error!("Failed to load initial domains from {}: {}", path, e);
+        HashSet::default()
+    });
+    
+    let state = AppState {
+        domains: Arc::new(ArcSwap::from_pointee(initial_domains)),
+    };
+
+    let port = std::env::var("PORT").unwrap_or("9999".to_string());
+
+    // Build application
+    let app = create_app(state);
 
     // Run server on localhost:<port>
     let address = SocketAddr::from((IpAddr::from(Ipv6Addr::UNSPECIFIED), port.parse()?));
-    let listener = tokio::net::TcpListener::bind(address).await?;
-
-    tracing::info!("Starting server on {}", address);
-
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    
+    // In test environment, we might not want to actually bind
+    #[cfg(not(test))]
+    {
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        tracing::info!("Starting server on {}", address);
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -123,11 +149,11 @@ struct VerifyParams {
     domain: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct VerifyResponse {
     domain: String,
     is_disposable: bool,
-    source: String,
+    source: std::borrow::Cow<'static, str>,
     checked_at: String,
 }
 
@@ -135,19 +161,241 @@ async fn verify_handler(
     State(state): State<AppState>,
     Query(params): Query<VerifyParams>,
 ) -> impl IntoResponse {
-    let domain_orig = params.domain.clone();
-    let domain = params.domain.to_lowercase();
-    let now = Utc::now().to_rfc3339();
+    let domain = params.domain;
+    
+    // Fast-path: Check if already lowercase to avoid allocation
+    let mut is_lowercase = true;
+    for b in domain.bytes() {
+        if b.is_ascii_uppercase() {
+            is_lowercase = false;
+            break;
+        }
+    }
 
-    let is_disposable = state.domains.contains(&domain);
+    let search_domain = if is_lowercase {
+        std::borrow::Cow::Borrowed(domain.as_str())
+    } else {
+        std::borrow::Cow::Owned(domain.to_ascii_lowercase())
+    };
+
+    // Use ArcSwap load to get a handle to the current set
+    let domains = state.domains.load();
+    let is_disposable = domains.contains(search_domain.as_ref());
+
+    let now = Utc::now().to_rfc3339();
 
     (
         StatusCode::OK,
         Json(VerifyResponse {
-            domain: domain_orig,
+            domain,
             is_disposable,
-            source: "assets/blocklist.txt".into(),
+            source: std::borrow::Cow::Borrowed("assets/blocklist.txt"),
             checked_at: now,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    #[test]
+    fn test_load_domains_from_file() -> std::io::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "example.com")?;
+        writeln!(file, "  SPAM.ORG  ")?;
+        writeln!(file, "# comment")?;
+        writeln!(file, "")?;
+        writeln!(file, "disposable.net")?;
+
+        let domains = load_domains_from_file(file.path().to_str().unwrap())?;
+        
+        assert_eq!(domains.len(), 3);
+        assert!(domains.contains("example.com"));
+        assert!(domains.contains("spam.org"));
+        assert!(domains.contains("disposable.net"));
+        assert!(!domains.contains("# comment"));
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_verify_handler_logic() {
+        let mut domains = DomainSet::default();
+        domains.insert("disposable.com".to_string());
+        
+        let state = AppState {
+            domains: Arc::new(ArcSwap::from_pointee(domains)),
+        };
+
+        // Test with disposable domain
+        let params = VerifyParams { domain: "DISPOSABLE.COM".to_string() };
+        let response = verify_handler(State(state.clone()), Query(params)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Test with safe domain
+        let params = VerifyParams { domain: "google.com".to_string() };
+        let response = verify_handler(State(state), Query(params)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_integration() {
+        let state = AppState {
+            domains: Arc::new(ArcSwap::from_pointee(DomainSet::default())),
+        };
+        let app = create_app(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/health-check").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["message"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_verify_integration() {
+        let mut domains = DomainSet::default();
+        domains.insert("trashmail.com".to_string());
+        
+        let state = AppState {
+            domains: Arc::new(ArcSwap::from_pointee(domains)),
+        };
+        let app = create_app(state);
+
+        // Test disposable domain
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/domains/verify?domain=trashmail.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let resp: VerifyResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.is_disposable);
+        assert_eq!(resp.domain, "trashmail.com");
+
+        // Test safe domain
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/domains/verify?domain=google.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let resp: VerifyResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!resp.is_disposable);
+
+        // Test with X-Forwarded-For header (for coverage of tracing layer)
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/domains/verify?domain=google.com")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Test with invalid query param (missing domain) - should return 400
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/domains/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_fallback_handler() {
+        let state = AppState {
+            domains: Arc::new(ArcSwap::from_pointee(DomainSet::default())),
+        };
+        let app = create_app(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/not-found").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "ROUTE_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_load_domains_file_not_found() {
+        let result = load_domains_from_file("non_existent_file.txt");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_smoke() {
+        // Ensure assets/blocklist.txt exists for the test
+        std::fs::create_dir_all("assets").unwrap();
+        if !std::path::Path::new("assets/blocklist.txt").exists() {
+            std::fs::write("assets/blocklist.txt", "example.com").unwrap();
+        }
+
+        // Now run() will only execute initialization logic in test mode
+        let result = run().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tracing_connect_info() {
+        use axum::extract::connect_info::MockConnectInfo;
+
+        let state = AppState {
+            domains: Arc::new(ArcSwap::from_pointee(DomainSet::default())),
+        };
+        let app = create_app(state);
+
+        let addr = "127.0.0.1:1234".parse::<SocketAddr>().unwrap();
+        
+        let response = app
+            .layer(MockConnectInfo(addr))
+            .oneshot(
+                Request::builder()
+                    .uri("/health-check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }

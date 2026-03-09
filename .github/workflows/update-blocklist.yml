@@ -1,0 +1,36 @@
+name: Update Disposable Domains Blocklist
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Run daily at midnight UTC
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  update-blocklist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run update script
+        run: |
+          chmod +x scripts/update_blocklist.sh
+          ./scripts/update_blocklist.sh
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(assets): update disposable domains blocklist"
+          title: "chore: update disposable domains blocklist"
+          body: |
+            Automated update of the disposable domains blocklist.
+            
+            This PR updates `assets/blocklist.txt` with the latest data from the upstream source.
+            Sanity checks (file size, presence of common domains like gmail.com, etc.) were performed before updating.
+          branch: "automation/update-blocklist"
+          base: "main"
+          delete-branch: true
+          labels: |
+            automated-pr
+            dependencies
