@@ -1,4 +1,4 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1.96.0-alpine AS chef
+FROM lukemathwalker/cargo-chef:0.1.77-rust-1.95.0-alpine3.23 AS chef
 
 # Create and change to the app directory.
 WORKDIR /app
