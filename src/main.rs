@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
