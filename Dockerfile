@@ -1,26 +1,28 @@
-FROM lukemathwalker/cargo-chef:0.1.77-rust-1.95.0-alpine3.23 AS chef
+# syntax=docker/dockerfile:1.7
 
-# Create and change to the app directory.
+ARG RUST_VERSION=1.96.1
+
+# ---- chef: rust toolchain + cargo-chef, cached as its own layer ----
+FROM rust:${RUST_VERSION}-slim-trixie AS chef
 WORKDIR /app
+RUN cargo install --locked cargo-chef@0.1.77
 
+# ---- planner: figure out the dependency "recipe" ----
 FROM chef AS planner
-COPY . ./
+COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM chef AS builder 
+# ---- builder: cook deps (cached layer), then build the real binary ----
+FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-
-# Build dependencies - this is the caching Docker layer!
 RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin disposable-domain-verifier
 
-# Build application
-COPY . ./
-RUN cargo build --release
-
-FROM builder as runner
-
-COPY --from=builder /app/assets assets
-COPY --from=builder /app/target/release/disposable-domain-verifier ./bin/disposable-domain-verifier
-COPY --from=builder /app/recipe.json recipe.json
-
-CMD ["./bin/disposable-domain-verifier"]
+# ---- runtime: distroless, debian 13 (trixie), non-root, no toolchain ----
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
+WORKDIR /app
+COPY --from=builder /app/assets ./assets
+COPY --from=builder /app/target/release/disposable-domain-verifier ./disposable-domain-verifier
+USER nonroot:nonroot
+ENTRYPOINT ["./disposable-domain-verifier"]
