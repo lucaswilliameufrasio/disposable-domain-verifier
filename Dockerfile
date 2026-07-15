@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.96.1
+ARG RUST_VERSION=1.97.0
 
 # ---- chef: rust toolchain + cargo-chef, cached as its own layer ----
 FROM rust:${RUST_VERSION}-slim-trixie AS chef
