@@ -157,19 +157,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::var("PORT").unwrap_or("9999".to_string());
 
     // Build application
-    let app = create_app(state);
+    let _app = create_app(state);
 
     // Run server on localhost:<port>
-    let address = SocketAddr::from((IpAddr::from(Ipv6Addr::UNSPECIFIED), port.parse()?));
+    let _address = SocketAddr::from((IpAddr::from(Ipv6Addr::UNSPECIFIED), port.parse()?));
 
     // In test environment, we might not want to actually bind
     #[cfg(not(test))]
     {
-        let listener = tokio::net::TcpListener::bind(address).await?;
-        tracing::info!("Starting server on {}", address);
+        let listener = tokio::net::TcpListener::bind(_address).await?;
+        tracing::info!("Starting server on {}", _address);
         axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
+            _app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await?;
     }
@@ -251,6 +251,7 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use serde_json::Value;
+    use std::io::Write;
     use tempfile::NamedTempFile;
     use tower::ServiceExt;
 
