@@ -43,7 +43,12 @@ enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message, code, extra) = match self {
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, "INTERNAL_SERVER_ERROR".to_string(), None),
+            AppError::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg,
+                "INTERNAL_SERVER_ERROR".to_string(),
+                None,
+            ),
             AppError::BadRequest(msg, code) => (StatusCode::BAD_REQUEST, msg, code, None),
         };
 
@@ -61,7 +66,8 @@ impl IntoResponse for AppError {
 
 /// Helper to read domains from a file path
 fn load_domains_from_file(path: &str) -> Result<DomainSet, AppError> {
-    let file = File::open(path).map_err(|e| AppError::Internal(format!("Failed to open blocklist: {}", e)))?;
+    let file = File::open(path)
+        .map_err(|e| AppError::Internal(format!("Failed to open blocklist: {}", e)))?;
     let reader = BufReader::new(file);
     let set = reader
         .lines()
@@ -130,7 +136,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve path: <current_dir>/assets/blocklist.txt
     let cwd = std::env::current_dir()?;
     let path_buffer = cwd.join("assets").join("blocklist.txt");
-    let path = path_buffer.to_str().expect("Path not defined properly").to_string();
+    let path = path_buffer
+        .to_str()
+        .expect("Path not defined properly")
+        .to_string();
 
     // Initialize with local file first for immediate availability
     let initial_domains = load_domains_from_file(&path).unwrap_or_else(|e| {
@@ -140,7 +149,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         HashSet::default()
     });
-    
+
     let state = AppState {
         domains: Arc::new(ArcSwap::from_pointee(initial_domains)),
     };
@@ -152,7 +161,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run server on localhost:<port>
     let address = SocketAddr::from((IpAddr::from(Ipv6Addr::UNSPECIFIED), port.parse()?));
-    
+
     // In test environment, we might not want to actually bind
     #[cfg(not(test))]
     {
@@ -195,11 +204,14 @@ async fn verify_handler(
     params: Result<Query<VerifyParams>, axum::extract::rejection::QueryRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     let Query(params) = params.map_err(|e| {
-        AppError::BadRequest(format!("Invalid query parameters: {}", e), "INVALID_QUERY_PARAMS".into())
+        AppError::BadRequest(
+            format!("Invalid query parameters: {}", e),
+            "INVALID_QUERY_PARAMS".into(),
+        )
     })?;
 
     let domain = params.domain;
-    
+
     // Fast-path: Check if already lowercase to avoid allocation
     let mut is_lowercase = true;
     for b in domain.bytes() {
@@ -235,11 +247,11 @@ async fn verify_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use serde_json::Value;
+    use tempfile::NamedTempFile;
     use tower::ServiceExt;
 
     #[test]
@@ -252,13 +264,13 @@ mod tests {
         writeln!(file, "disposable.net").unwrap();
 
         let domains = load_domains_from_file(file.path().to_str().unwrap())?;
-        
+
         assert_eq!(domains.len(), 3);
         assert!(domains.contains("example.com"));
         assert!(domains.contains("spam.org"));
         assert!(domains.contains("disposable.net"));
         assert!(!domains.contains("# comment"));
-        
+
         Ok(())
     }
 
@@ -266,19 +278,29 @@ mod tests {
     async fn test_verify_handler_logic() {
         let mut domains = DomainSet::default();
         domains.insert("disposable.com".to_string());
-        
+
         let state = AppState {
             domains: Arc::new(ArcSwap::from_pointee(domains)),
         };
 
         // Test with disposable domain
-        let params = Query(VerifyParams { domain: "DISPOSABLE.COM".to_string() });
-        let response = verify_handler(State(state.clone()), Ok(params)).await.unwrap().into_response();
+        let params = Query(VerifyParams {
+            domain: "DISPOSABLE.COM".to_string(),
+        });
+        let response = verify_handler(State(state.clone()), Ok(params))
+            .await
+            .unwrap()
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         // Test with safe domain
-        let params = Query(VerifyParams { domain: "google.com".to_string() });
-        let response = verify_handler(State(state), Ok(params)).await.unwrap().into_response();
+        let params = Query(VerifyParams {
+            domain: "google.com".to_string(),
+        });
+        let response = verify_handler(State(state), Ok(params))
+            .await
+            .unwrap()
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -290,12 +312,17 @@ mod tests {
         let app = create_app(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/health-check").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health-check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["status"], "up");
@@ -305,7 +332,7 @@ mod tests {
     async fn test_verify_integration() {
         let mut domains = DomainSet::default();
         domains.insert("trashmail.com".to_string());
-        
+
         let state = AppState {
             domains: Arc::new(ArcSwap::from_pointee(domains)),
         };
@@ -354,7 +381,12 @@ mod tests {
         let app = create_app(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/not-found").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/not-found")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
