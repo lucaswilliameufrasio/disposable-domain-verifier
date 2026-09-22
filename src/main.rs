@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::{StatusCode, Uri},
+    http::{StatusCode, Uri, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -23,6 +23,11 @@ use std::{
 };
 
 type DomainSet = HashSet<String, ahash::RandomState>;
+
+// The blocklist is refreshed by deployment, not per request. Let the edge
+// serve verification results for several hours and refresh them in background.
+const VERIFY_CACHE_CONTROL: &str =
+    "public, max-age=300, s-maxage=21600, stale-while-revalidate=604800";
 
 // --- Error Handling Standard ---
 
@@ -235,6 +240,7 @@ async fn verify_handler(
 
     Ok((
         StatusCode::OK,
+        [(CACHE_CONTROL, VERIFY_CACHE_CONTROL)],
         Json(VerifyResponse {
             domain,
             is_disposable,
@@ -352,6 +358,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("cache-control").unwrap(),
+            "public, max-age=300, s-maxage=21600, stale-while-revalidate=604800"
+        );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let resp: VerifyResponse = serde_json::from_slice(&body).unwrap();
         assert!(resp.is_disposable);
