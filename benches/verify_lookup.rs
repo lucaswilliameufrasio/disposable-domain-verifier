@@ -10,8 +10,46 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
 
+fn previous_two_pass_normalization(domain: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if domain.len() > 253
+        || domain.is_empty()
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+    {
+        return None;
+    }
+    if !domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return None;
+    }
+    if domain.bytes().all(|byte| !byte.is_ascii_uppercase()) {
+        Some(std::borrow::Cow::Borrowed(domain))
+    } else {
+        Some(std::borrow::Cow::Owned(domain.to_ascii_lowercase()))
+    }
+}
+
 fn lookup_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("exact_domain_lookup");
+    let mut normalization = c.benchmark_group("hostname_normalization");
+    for domain in ["example.com", "Mail.Example.COM"] {
+        normalization.bench_function(format!("one_pass/{domain}"), |b| {
+            b.iter(|| service::normalize_valid_domain(black_box(domain)))
+        });
+        normalization.bench_function(format!("previous_two_pass/{domain}"), |b| {
+            b.iter(|| previous_two_pass_normalization(black_box(domain)))
+        });
+    }
+    normalization.finish();
+
+    let mut group = c.benchmark_group("verify_http_request");
     for size in [10_000, 100_000, 1_000_000] {
         let domains = (0..size).map(|i| format!("disposable-{i}.example"));
         let app = service::benchmark_app_with_domains(domains);

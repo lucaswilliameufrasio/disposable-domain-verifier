@@ -116,23 +116,51 @@ pub fn load_domain_lines(path: &str) -> Result<HashSet<String>, String> {
 }
 
 pub fn is_valid_domain(domain: &str) -> bool {
-    if domain.len() > 253
-        || domain.is_empty()
-        || !domain.contains('.')
-        || domain.starts_with('.')
-        || domain.ends_with('.')
-    {
-        return false;
+    normalize_valid_domain(domain).is_some()
+}
+
+pub(crate) fn normalize_valid_domain(domain: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if domain.is_empty() || domain.len() > 253 {
+        return None;
     }
-    domain.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    })
+
+    let mut label_len = 0;
+    let mut dot_count = 0;
+    let mut previous_was_hyphen = false;
+    let mut has_uppercase = false;
+
+    for byte in domain.bytes() {
+        if byte == b'.' {
+            if label_len == 0 || previous_was_hyphen {
+                return None;
+            }
+            dot_count += 1;
+            label_len = 0;
+            previous_was_hyphen = false;
+            continue;
+        }
+
+        let is_hyphen = byte == b'-';
+        if !(byte.is_ascii_alphanumeric() || is_hyphen)
+            || (label_len == 0 && is_hyphen)
+            || label_len == 63
+        {
+            return None;
+        }
+        has_uppercase |= byte.is_ascii_uppercase();
+        label_len += 1;
+        previous_was_hyphen = is_hyphen;
+    }
+
+    if dot_count == 0 || label_len == 0 || previous_was_hyphen {
+        return None;
+    }
+
+    if has_uppercase {
+        Some(std::borrow::Cow::Owned(domain.to_ascii_lowercase()))
+    } else {
+        Some(std::borrow::Cow::Borrowed(domain))
+    }
 }
 
 pub fn validate_blocklist(blocklist_path: &str, protected_path: &str) -> Result<(), String> {
@@ -288,27 +316,12 @@ async fn verify_handler(
 
     let domain = params.domain;
 
-    if !is_valid_domain(&domain) {
-        return Err(AppError::BadRequest(
+    let search_domain = normalize_valid_domain(&domain).ok_or_else(|| {
+        AppError::BadRequest(
             "The domain parameter must be a valid hostname".into(),
             "INVALID_DOMAIN".into(),
-        ));
-    }
-
-    // Fast-path: Check if already lowercase to avoid allocation
-    let mut is_lowercase = true;
-    for b in domain.bytes() {
-        if b.is_ascii_uppercase() {
-            is_lowercase = false;
-            break;
-        }
-    }
-
-    let search_domain = if is_lowercase {
-        std::borrow::Cow::Borrowed(domain.as_str())
-    } else {
-        std::borrow::Cow::Owned(domain.to_ascii_lowercase())
-    };
+        )
+    })?;
 
     // Use ArcSwap load to get a handle to the current set
     let domains = state.domains.load();
@@ -404,6 +417,14 @@ mod tests {
         for valid in ["example.com", "sub.example.co.uk", "xn--bcher-kva.example"] {
             assert!(is_valid_domain(valid), "rejected valid hostname: {valid}");
         }
+        assert_eq!(
+            normalize_valid_domain("Mail.Example.COM").unwrap(),
+            "mail.example.com"
+        );
+        assert!(matches!(
+            normalize_valid_domain("example.com"),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
     }
 
     #[test]
