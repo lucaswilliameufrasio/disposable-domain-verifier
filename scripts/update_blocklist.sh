@@ -44,7 +44,7 @@ def read_domains(path):
             if not domain or domain.startswith("#"):
                 continue
             labels = domain.split(".")
-            if (len(domain) > 253 or any(not label or len(label) > 63 or
+            if (len(domain) > 253 or len(labels) < 2 or any(not label or len(label) > 63 or
                     label.startswith("-") or label.endswith("-") or
                     any(not (char.isascii() and (char.isalnum() or char == "-")) for char in label)
                     for label in labels)):
