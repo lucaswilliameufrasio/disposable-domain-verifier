@@ -97,6 +97,11 @@ fn load_domains_from_file(path: &str) -> Result<DomainSet, AppError> {
     Ok(set)
 }
 
+fn load_runtime_domains(blocklist_path: &str, protected_path: &str) -> Result<DomainSet, AppError> {
+    validate_blocklist(blocklist_path, protected_path).map_err(AppError::Internal)?;
+    load_domains_from_file(blocklist_path)
+}
+
 pub fn load_domain_lines(path: &str) -> Result<HashSet<String>, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open {path}: {e}"))?;
     let reader = BufReader::new(file);
@@ -247,12 +252,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_str()
         .expect("Path not defined properly")
         .to_string();
+    let protected_path = cwd.join("assets").join("legitimate-domains.txt");
+    let protected_path = protected_path
+        .to_str()
+        .expect("Protected-domain path not defined properly")
+        .to_string();
 
-    // Initialize with local file first for immediate availability
-    let initial_domains = load_domains_from_file(&path).map_err(|error| match error {
-        AppError::Internal(message) => std::io::Error::other(message),
-        AppError::BadRequest(message, _) => std::io::Error::other(message),
-    })?;
+    // Fail closed if the loaded list is malformed or contains protected domains.
+    let initial_domains =
+        load_runtime_domains(&path, &protected_path).map_err(|error| match error {
+            AppError::Internal(message) => std::io::Error::other(message),
+            AppError::BadRequest(message, _) => std::io::Error::other(message),
+        })?;
 
     let state = AppState {
         domains: Arc::new(ArcSwap::from_pointee(initial_domains)),
@@ -457,6 +468,22 @@ mod tests {
     #[test]
     fn canonical_blocklist_does_not_contain_protected_domains() {
         validate_blocklist("assets/blocklist.txt", "assets/legitimate-domains.txt").unwrap();
+    }
+
+    #[test]
+    fn runtime_loader_fails_closed_for_protected_domains() {
+        let blocklist = NamedTempFile::new().unwrap();
+        let protected = NamedTempFile::new().unwrap();
+        std::fs::write(blocklist.path(), "disposable.example\ngmail.com\n").unwrap();
+        std::fs::write(protected.path(), "gmail.com\n").unwrap();
+
+        let error = load_runtime_domains(
+            blocklist.path().to_str().unwrap(),
+            protected.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:?}").contains("gmail.com"));
     }
 
     #[test]
