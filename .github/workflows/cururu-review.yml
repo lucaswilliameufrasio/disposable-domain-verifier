@@ -75,7 +75,7 @@ jobs:
           pr_number: ${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number }}
 
   blocklist-safety:
-    if: github.event_name == 'pull_request_target' && github.event.pull_request.draft == false
+    if: github.event_name == 'pull_request_target'
     permissions:
       contents: read
       pull-requests: read
