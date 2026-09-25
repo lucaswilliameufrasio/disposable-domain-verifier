@@ -69,18 +69,100 @@ impl IntoResponse for AppError {
 
 // --- App Logic ---
 
-/// Helper to read domains from a file path
-fn load_domains_from_file(path: &str) -> Result<DomainSet, AppError> {
-    let file = File::open(path)
-        .map_err(|e| AppError::Internal(format!("Failed to open blocklist: {}", e)))?;
+pub fn load_domain_lines(path: &str) -> Result<HashSet<String>, String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open {path}: {e}"))?;
     let reader = BufReader::new(file);
-    let set = reader
-        .lines()
-        .map_while(Result::ok)
-        .map(|line| line.trim().to_lowercase())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect();
-    Ok(set)
+    let mut domains = HashSet::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("Failed to read {path}: {e}"))?;
+        let domain = line.trim().to_ascii_lowercase();
+        if domain.is_empty() || domain.starts_with('#') {
+            continue;
+        }
+        if !is_valid_domain(&domain) {
+            return Err(format!("Invalid domain at {path}:{}: {domain}", index + 1));
+        }
+        domains.insert(domain);
+    }
+    Ok(domains)
+}
+
+fn ensure_no_protected_domains(
+    blocklist: &HashSet<String>,
+    protected: &HashSet<String>,
+) -> Result<(), String> {
+    let mut blocked_legitimate: Vec<_> = blocklist.intersection(protected).cloned().collect();
+    blocked_legitimate.sort();
+    if blocked_legitimate.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Blocklist contains legitimate domains: {}",
+            blocked_legitimate.join(", ")
+        ))
+    }
+}
+
+fn load_runtime_domains(blocklist_path: &str, protected_path: &str) -> Result<DomainSet, AppError> {
+    // Read the blocklist once and validate the exact set that will be served.
+    let blocklist = load_domain_lines(blocklist_path).map_err(AppError::Internal)?;
+    let protected = load_domain_lines(protected_path).map_err(AppError::Internal)?;
+    ensure_no_protected_domains(&blocklist, &protected).map_err(AppError::Internal)?;
+    Ok(blocklist.into_iter().collect())
+}
+
+pub fn is_valid_domain(domain: &str) -> bool {
+    normalize_valid_domain(domain).is_some()
+}
+
+pub(crate) fn normalize_valid_domain(domain: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if domain.is_empty() || domain.len() > 253 {
+        return None;
+    }
+
+    let mut label_len = 0;
+    let mut dot_count = 0;
+    let mut previous_was_hyphen = false;
+    let mut has_uppercase = false;
+
+    for byte in domain.bytes() {
+        if byte == b'.' {
+            if label_len == 0 || previous_was_hyphen {
+                return None;
+            }
+            dot_count += 1;
+            label_len = 0;
+            previous_was_hyphen = false;
+            continue;
+        }
+
+        let is_hyphen = byte == b'-';
+        if !(byte.is_ascii_alphanumeric() || is_hyphen)
+            || (label_len == 0 && is_hyphen)
+            || label_len == 63
+        {
+            return None;
+        }
+        has_uppercase |= byte.is_ascii_uppercase();
+        label_len += 1;
+        previous_was_hyphen = is_hyphen;
+    }
+
+    if dot_count == 0 || label_len == 0 || previous_was_hyphen {
+        return None;
+    }
+
+    if has_uppercase {
+        Some(std::borrow::Cow::Owned(domain.to_ascii_lowercase()))
+    } else {
+        Some(std::borrow::Cow::Borrowed(domain))
+    }
+}
+
+pub fn validate_blocklist(blocklist_path: &str, protected_path: &str) -> Result<(), String> {
+    let blocklist = load_domain_lines(blocklist_path)?;
+    let protected = load_domain_lines(protected_path)?;
+    ensure_no_protected_domains(&blocklist, &protected)
 }
 
 #[derive(Clone)]
@@ -129,6 +211,13 @@ fn create_app(state: AppState) -> Router {
         .fallback(fallback_handler)
 }
 
+pub fn benchmark_app_with_domains(domains: impl IntoIterator<Item = String>) -> Router {
+    let domains: DomainSet = domains.into_iter().collect();
+    create_app(AppState {
+        domains: Arc::new(ArcSwap::from_pointee(domains)),
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     run().await
@@ -145,15 +234,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_str()
         .expect("Path not defined properly")
         .to_string();
+    let protected_path = cwd.join("assets").join("legitimate-domains.txt");
+    let protected_path = protected_path
+        .to_str()
+        .expect("Protected-domain path not defined properly")
+        .to_string();
 
-    // Initialize with local file first for immediate availability
-    let initial_domains = load_domains_from_file(&path).unwrap_or_else(|e| {
-        match e {
-            AppError::Internal(msg) => tracing::error!("{}", msg),
-            _ => tracing::error!("Error loading domains: {:?}", e),
-        }
-        HashSet::default()
-    });
+    // Fail closed if the loaded list is malformed or contains protected domains.
+    let initial_domains =
+        load_runtime_domains(&path, &protected_path).map_err(|error| match error {
+            AppError::Internal(message) => std::io::Error::other(message),
+            AppError::BadRequest(message, _) => std::io::Error::other(message),
+        })?;
 
     let state = AppState {
         domains: Arc::new(ArcSwap::from_pointee(initial_domains)),
@@ -217,20 +309,12 @@ async fn verify_handler(
 
     let domain = params.domain;
 
-    // Fast-path: Check if already lowercase to avoid allocation
-    let mut is_lowercase = true;
-    for b in domain.bytes() {
-        if b.is_ascii_uppercase() {
-            is_lowercase = false;
-            break;
-        }
-    }
-
-    let search_domain = if is_lowercase {
-        std::borrow::Cow::Borrowed(domain.as_str())
-    } else {
-        std::borrow::Cow::Owned(domain.to_ascii_lowercase())
-    };
+    let search_domain = normalize_valid_domain(&domain).ok_or_else(|| {
+        AppError::BadRequest(
+            "The domain parameter must be a valid hostname".into(),
+            "INVALID_DOMAIN".into(),
+        )
+    })?;
 
     // Use ArcSwap load to get a handle to the current set
     let domains = state.domains.load();
@@ -262,23 +346,137 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
-    fn test_load_domains_from_file() -> Result<(), AppError> {
-        let mut file = NamedTempFile::new().map_err(|e| AppError::Internal(e.to_string()))?;
+    fn test_load_domains_from_file() {
+        let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "example.com").unwrap();
         writeln!(file, "  SPAM.ORG  ").unwrap();
         writeln!(file, "# comment").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "disposable.net").unwrap();
 
-        let domains = load_domains_from_file(file.path().to_str().unwrap())?;
+        let domains = load_domain_lines(file.path().to_str().unwrap()).unwrap();
 
         assert_eq!(domains.len(), 3);
         assert!(domains.contains("example.com"));
         assert!(domains.contains("spam.org"));
         assert!(domains.contains("disposable.net"));
         assert!(!domains.contains("# comment"));
+    }
 
-        Ok(())
+    #[test]
+    fn blocklist_validator_rejects_protected_domains_and_malformed_lines() {
+        let blocklist = NamedTempFile::new().unwrap();
+        let protected = NamedTempFile::new().unwrap();
+        std::fs::write(blocklist.path(), "mailinator.com\ngmail.com\n").unwrap();
+        std::fs::write(protected.path(), "gmail.com\n").unwrap();
+        assert!(
+            validate_blocklist(
+                blocklist.path().to_str().unwrap(),
+                protected.path().to_str().unwrap()
+            )
+            .unwrap_err()
+            .contains("gmail.com")
+        );
+
+        std::fs::write(blocklist.path(), "mailinator.com\nnot a domain\n").unwrap();
+        assert!(
+            validate_blocklist(
+                blocklist.path().to_str().unwrap(),
+                protected.path().to_str().unwrap()
+            )
+            .unwrap_err()
+            .contains("Invalid domain")
+        );
+    }
+
+    #[test]
+    fn hostname_validation_rejects_urls_emails_and_invalid_labels() {
+        for invalid in [
+            "https://example.com",
+            "user@example.com",
+            "example.com/path",
+            "-bad.example",
+            "bad-.example",
+            "example..com",
+            "localhost",
+        ] {
+            assert!(
+                !is_valid_domain(invalid),
+                "accepted invalid hostname: {invalid}"
+            );
+        }
+        for valid in ["example.com", "sub.example.co.uk", "xn--bcher-kva.example"] {
+            assert!(is_valid_domain(valid), "rejected valid hostname: {valid}");
+        }
+        assert_eq!(
+            normalize_valid_domain("Mail.Example.COM").unwrap(),
+            "mail.example.com"
+        );
+        assert!(matches!(
+            normalize_valid_domain("example.com"),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
+    }
+
+    #[test]
+    fn blocklist_loader_rejects_malformed_entries() {
+        let blocklist = NamedTempFile::new().unwrap();
+        std::fs::write(blocklist.path(), "valid.example\nnot a domain\n").unwrap();
+        assert!(load_domain_lines(blocklist.path().to_str().unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_endpoint_rejects_invalid_domain_values() {
+        let state = AppState {
+            domains: Arc::new(ArcSwap::from_pointee(DomainSet::default())),
+        };
+        let response = create_app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/domains/verify?domain=https%3A%2F%2Fexample.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error_code"], "INVALID_DOMAIN");
+    }
+
+    #[test]
+    fn canonical_blocklist_does_not_contain_protected_domains() {
+        validate_blocklist("assets/blocklist.txt", "assets/legitimate-domains.txt").unwrap();
+    }
+
+    #[test]
+    fn runtime_loader_fails_closed_for_protected_domains() {
+        let blocklist = NamedTempFile::new().unwrap();
+        let protected = NamedTempFile::new().unwrap();
+        std::fs::write(blocklist.path(), "disposable.example\ngmail.com\n").unwrap();
+        std::fs::write(protected.path(), "gmail.com\n").unwrap();
+
+        let error = load_runtime_domains(
+            blocklist.path().to_str().unwrap(),
+            protected.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:?}").contains("gmail.com"));
+    }
+
+    #[test]
+    fn validate_blocklist_uses_explicit_candidate_path() {
+        let candidate = NamedTempFile::new().unwrap();
+        let protected = NamedTempFile::new().unwrap();
+        std::fs::write(candidate.path(), "mailinator.com\n").unwrap();
+        std::fs::write(protected.path(), "gmail.com\n").unwrap();
+        validate_blocklist(
+            candidate.path().to_str().unwrap(),
+            protected.path().to_str().unwrap(),
+        )
+        .unwrap();
     }
 
     #[tokio::test]

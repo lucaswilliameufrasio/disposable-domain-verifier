@@ -27,4 +27,8 @@ strip = true
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+criterion = { version = "0.7", features = ["async_tokio"] }
 
+[[bench]]
+name = "verify_lookup"
+harness = false

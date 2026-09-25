@@ -31,6 +31,34 @@ for domain in "gmail.com" "outlook.com" "hotmail.com" "yahoo.com" "icloud.com"; 
     fi
 done
 
+# Reject malformed entries and any protected legitimate domain before replacing
+# the checked-in list. Keep exact matching: lookalike disposable domains remain valid.
+python3 - "$TEMP_FILE" "assets/legitimate-domains.txt" <<'PY'
+import sys
+
+def read_domains(path):
+    result = set()
+    with open(path, encoding="utf-8") as source:
+        for number, raw in enumerate(source, 1):
+            domain = raw.strip().lower()
+            if not domain or domain.startswith("#"):
+                continue
+            labels = domain.split(".")
+            if (len(domain) > 253 or len(labels) < 2 or any(not label or len(label) > 63 or
+                    label.startswith("-") or label.endswith("-") or
+                    any(not (char.isascii() and (char.isalnum() or char == "-")) for char in label)
+                    for label in labels)):
+                raise SystemExit(f"Invalid domain at {path}:{number}: {domain}")
+            result.add(domain)
+    return result
+
+candidate = read_domains(sys.argv[1])
+protected = read_domains(sys.argv[2])
+blocked = sorted(candidate & protected)
+if blocked:
+    raise SystemExit("Protected legitimate domains found: " + ", ".join(blocked))
+PY
+
 # Sanity Check 3: Must contain at least some known disposable domains to ensure it's the right list
 # e.g., mailinator.com or 10minutemail.com
 FOUND_KNOWN=0

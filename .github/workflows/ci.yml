@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -38,3 +39,6 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Compile benchmarks
+        run: cargo bench --bench verify_lookup --no-run
