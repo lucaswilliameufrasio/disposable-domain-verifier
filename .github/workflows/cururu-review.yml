@@ -40,9 +40,11 @@ jobs:
           mkdir -p artifacts
           set +e
           cargo check --message-format json > artifacts/check.log 2>&1
-          echo $? > artifacts/check.exit
-          cargo clippy --message-format json > artifacts/clippy.log 2>&1
-          echo $? > artifacts/clippy.exit
+          check_status=$?
+          echo "$check_status" > artifacts/check.exit
+          cargo clippy --all-targets --message-format json -- -D warnings > artifacts/clippy.log 2>&1
+          clippy_status=$?
+          echo "$clippy_status" > artifacts/clippy.exit
       - name: Emit manifest
         run: |
           python3 - <<'PY'
@@ -69,6 +71,13 @@ jobs:
           name: analysis
           path: artifacts/
           retention-days: 3
+      - name: Fail when analyzers fail
+        if: always()
+        run: |
+          if [ "$(cat artifacts/check.exit)" -ne 0 ] || [ "$(cat artifacts/clippy.exit)" -ne 0 ]; then
+            echo "::error::Cargo check or Clippy failed; refusing to review this PR."
+            exit 1
+          fi
 
   review:
     needs: analyzers
@@ -84,6 +93,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number || inputs.pr_number) }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: analysis
@@ -106,3 +116,45 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
           pr_number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+
+  blocklist-safety:
+    if: github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number || inputs.pr_number) }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master @ 2026-09-22
+        with:
+          toolchain: 1.98.1
+      - name: Validate blocklist and legitimate-domain protections
+        run: cargo test blocklist_validator_
+      - name: Validate additions against protected domains
+        if: github.event_name == 'pull_request_target'
+        run: |
+          git diff --unified=0 "${{ github.event.pull_request.base.sha }}" HEAD -- assets/blocklist.txt | \
+            awk '/^\+[^+]/ { domain=substr($0,2); if (domain !~ /^[[:space:]]*(#|$)/) print domain }' > /tmp/blocklist-additions.txt
+          if [ -s /tmp/blocklist-additions.txt ]; then
+            git show "${{ github.event.pull_request.base.sha }}:assets/legitimate-domains.txt" > /tmp/base-legitimate-domains.txt
+            python3 - <<'PY'
+          from pathlib import Path
+          additions = {line.strip().lower() for line in Path('/tmp/blocklist-additions.txt').read_text().splitlines() if line.strip()}
+          protected = {line.strip().lower() for line in Path('/tmp/base-legitimate-domains.txt').read_text().splitlines() if line.strip() and not line.lstrip().startswith('#')}
+          blocked = sorted(additions & protected)
+          if blocked:
+              raise SystemExit('PR adds protected legitimate domains: ' + ', '.join(blocked))
+          print(f'Validated {len(additions)} new blocklist domains against {len(protected)} protected domains.')
+          PY
+          fi
+      - name: Validate checked-in list against protected domains
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha || 'HEAD^' }}" HEAD -- assets/blocklist.txt | grep -q .; then
+            cargo test canonical_blocklist_does_not_contain_protected_domains
+          else
+            echo "No blocklist changes in this PR."
+          fi

@@ -2,7 +2,7 @@ version = 1
 
 [provider]
 name = "openrouter"
-model = "openai/gpt-5.6-luna"
+model = "openai/gpt-6-luna"
 
 [review]
 max_diff_bytes = 50000
