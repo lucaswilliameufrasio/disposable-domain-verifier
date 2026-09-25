@@ -37,11 +37,3 @@ exclude = ["**/generated/**", "**/*.min.js"]
 [summary]
 show_cost = true
 show_usage = true
-
-[analysis]
-enabled = true
-manifest = "artifacts/analysis.json"
-max_findings = 100
-require_current_head = true
-check_runs = true
-check_run_names = []

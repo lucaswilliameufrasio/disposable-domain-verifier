@@ -3,6 +3,9 @@ name: Cururu PR Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -18,70 +21,17 @@ permissions:
   issues: write
 
 concurrency:
-  group: cururu-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  group: cururu-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
-  analyzers:
-    if: (github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && github.actor != 'dependabot[bot]'
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number || inputs.pr_number) }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master @ 2026-09-22
-        with:
-          toolchain: 1.98.1
-      - name: Run analyzers
-        run: |
-          mkdir -p artifacts
-          set +e
-          cargo check --message-format json > artifacts/check.log 2>&1
-          check_status=$?
-          echo "$check_status" > artifacts/check.exit
-          cargo clippy --all-targets --message-format json -- -D warnings > artifacts/clippy.log 2>&1
-          clippy_status=$?
-          echo "$clippy_status" > artifacts/clippy.exit
-      - name: Emit manifest
-        run: |
-          python3 - <<'PY'
-          import json, os, subprocess
-          head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-          tools = []
-          for name in ("check", "clippy"):
-              exit_path = f"artifacts/{name}.exit"
-              log_path = f"artifacts/{name}.log"
-              if not os.path.exists(exit_path):
-                  tools.append({"name": f"cargo-{name}", "status": "not_run", "exit_code": 0, "message": None})
-                  continue
-              code = int(open(exit_path).read().strip() or 1)
-              message = None
-              if code != 0 and os.path.exists(log_path):
-                  message = open(log_path, errors="replace").read().strip()[-400:]
-              tools.append({"name": f"cargo-{name}", "status": "passed" if code == 0 else "failed",
-                            "exit_code": code, "message": message})
-          with open("artifacts/analysis.json", "w") as f:
-              json.dump({"schema_version": 1, "commit_sha": head, "tools": tools}, f, indent=2)
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: analysis
-          path: artifacts/
-          retention-days: 3
-      - name: Fail when analyzers fail
-        if: always()
-        run: |
-          if [ "$(cat artifacts/check.exit)" -ne 0 ] || [ "$(cat artifacts/clippy.exit)" -ne 0 ]; then
-            echo "::error::Cargo check or Clippy failed; refusing to review this PR."
-            exit 1
-          fi
-
   review:
-    needs: analyzers
-    if: (github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false) && github.actor != 'dependabot[bot]'
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.pull_requests[0].number) ||
+      github.event_name == 'issue_comment' ||
+      github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       pull-requests: write
@@ -89,15 +39,6 @@ jobs:
       checks: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number || inputs.pr_number) }}
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: analysis
-          path: artifacts
       - name: Check LLM API key
         id: llm_key
         env:
@@ -115,46 +56,84 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
-          pr_number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+          pr_number: ${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number }}
 
   blocklist-safety:
-    if: github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.draft == false
     permissions:
       contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number || inputs.pr_number) }}
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-          fetch-depth: 0
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master @ 2026-09-22
-        with:
-          toolchain: 1.98.1
-      - name: Validate blocklist and legitimate-domain protections
-        run: cargo test blocklist_validator_
-      - name: Validate additions against protected domains
-        if: github.event_name == 'pull_request_target'
+      - name: Validate blocklist diff without executing PR code
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          git diff --unified=0 "${{ github.event.pull_request.base.sha }}" HEAD -- assets/blocklist.txt | \
-            awk '/^\+[^+]/ { domain=substr($0,2); if (domain !~ /^[[:space:]]*(#|$)/) print domain }' > /tmp/blocklist-additions.txt
-          if [ -s /tmp/blocklist-additions.txt ]; then
-            git show "${{ github.event.pull_request.base.sha }}:assets/legitimate-domains.txt" > /tmp/base-legitimate-domains.txt
-            python3 - <<'PY'
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
           from pathlib import Path
-          additions = {line.strip().lower() for line in Path('/tmp/blocklist-additions.txt').read_text().splitlines() if line.strip()}
-          protected = {line.strip().lower() for line in Path('/tmp/base-legitimate-domains.txt').read_text().splitlines() if line.strip() and not line.lstrip().startswith('#')}
-          blocked = sorted(additions & protected)
-          if blocked:
-              raise SystemExit('PR adds protected legitimate domains: ' + ', '.join(blocked))
-          print(f'Validated {len(additions)} new blocklist domains against {len(protected)} protected domains.')
+
+          diff = subprocess.run(
+              ["gh", "pr", "diff", os.environ["PR_NUMBER"], "--repo", os.environ["REPOSITORY"]],
+              check=True, capture_output=True, text=True,
+          ).stdout
+          blocklist_additions = set()
+          protected_additions = set()
+          protected_deletions = set()
+          current_file = None
+          for line in diff.splitlines():
+              if line.startswith("diff --git "):
+                  current_file = line.split(" b/", 1)[1]
+              elif line.startswith(("+++", "---")):
+                  continue
+              elif line.startswith("+") or line.startswith("-"):
+                  value = line[1:].strip().lower()
+                  if not value or value.startswith("#"):
+                      continue
+                  if current_file == "assets/blocklist.txt" and line.startswith("+"):
+                      blocklist_additions.add(value)
+                  elif current_file == "assets/legitimate-domains.txt":
+                      if line.startswith("+"):
+                          protected_additions.add(value)
+                      else:
+                          protected_deletions.add(value)
+
+          def valid_domain(domain):
+              if len(domain) > 253:
+                  return False
+              labels = domain.split(".")
+              return len(labels) >= 2 and all(
+                  0 < len(label) <= 63
+                  and not label.startswith("-")
+                  and not label.endswith("-")
+                  and re.fullmatch(r"[a-z0-9-]+", label)
+                  for label in labels
+              )
+
+          protected_path = Path("assets/legitimate-domains.txt")
+          base_protected = {
+              line.strip().lower()
+              for line in (protected_path.read_text().splitlines() if protected_path.exists() else [])
+              if line.strip() and not line.lstrip().startswith("#")
+          }
+          removed_protected = sorted(base_protected & protected_deletions)
+          invalid_additions = sorted(domain for domain in blocklist_additions if not valid_domain(domain))
+          protected_hits = sorted(blocklist_additions & (base_protected | protected_additions))
+          if removed_protected or invalid_additions or protected_hits:
+              if removed_protected:
+                  print("Protected domains cannot be removed: " + ", ".join(removed_protected))
+              if invalid_additions:
+                  print("Malformed domains added to blocklist: " + ", ".join(invalid_additions))
+              if protected_hits:
+                  print("Legitimate domains added to blocklist: " + ", ".join(protected_hits))
+              raise SystemExit(1)
+          print(f"Validated {len(blocklist_additions)} blocklist additions against {len(base_protected)} trusted protections.")
           PY
-          fi
-      - name: Validate checked-in list against protected domains
-        run: |
-          if git diff --name-only "${{ github.event.pull_request.base.sha || 'HEAD^' }}" HEAD -- assets/blocklist.txt | grep -q .; then
-            cargo test canonical_blocklist_does_not_contain_protected_domains
-          else
-            echo "No blocklist changes in this PR."
-          fi
