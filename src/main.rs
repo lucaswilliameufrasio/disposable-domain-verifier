@@ -69,39 +69,6 @@ impl IntoResponse for AppError {
 
 // --- App Logic ---
 
-/// Helper to read domains from a file path
-fn load_domains_from_file(path: &str) -> Result<DomainSet, AppError> {
-    let file = File::open(path)
-        .map_err(|e| AppError::Internal(format!("Failed to open blocklist: {}", e)))?;
-    let reader = BufReader::new(file);
-    let mut set = DomainSet::default();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to read blocklist at line {}: {e}",
-                index + 1
-            ))
-        })?;
-        let domain = line.trim().to_ascii_lowercase();
-        if domain.is_empty() || domain.starts_with('#') {
-            continue;
-        }
-        if !is_valid_domain(&domain) {
-            return Err(AppError::Internal(format!(
-                "Invalid domain in blocklist at line {}: {domain}",
-                index + 1
-            )));
-        }
-        set.insert(domain);
-    }
-    Ok(set)
-}
-
-fn load_runtime_domains(blocklist_path: &str, protected_path: &str) -> Result<DomainSet, AppError> {
-    validate_blocklist(blocklist_path, protected_path).map_err(AppError::Internal)?;
-    load_domains_from_file(blocklist_path)
-}
-
 pub fn load_domain_lines(path: &str) -> Result<HashSet<String>, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open {path}: {e}"))?;
     let reader = BufReader::new(file);
@@ -118,6 +85,30 @@ pub fn load_domain_lines(path: &str) -> Result<HashSet<String>, String> {
         domains.insert(domain);
     }
     Ok(domains)
+}
+
+fn ensure_no_protected_domains(
+    blocklist: &HashSet<String>,
+    protected: &HashSet<String>,
+) -> Result<(), String> {
+    let mut blocked_legitimate: Vec<_> = blocklist.intersection(protected).cloned().collect();
+    blocked_legitimate.sort();
+    if blocked_legitimate.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Blocklist contains legitimate domains: {}",
+            blocked_legitimate.join(", ")
+        ))
+    }
+}
+
+fn load_runtime_domains(blocklist_path: &str, protected_path: &str) -> Result<DomainSet, AppError> {
+    // Read the blocklist once and validate the exact set that will be served.
+    let blocklist = load_domain_lines(blocklist_path).map_err(AppError::Internal)?;
+    let protected = load_domain_lines(protected_path).map_err(AppError::Internal)?;
+    ensure_no_protected_domains(&blocklist, &protected).map_err(AppError::Internal)?;
+    Ok(blocklist.into_iter().collect())
 }
 
 pub fn is_valid_domain(domain: &str) -> bool {
@@ -171,16 +162,7 @@ pub(crate) fn normalize_valid_domain(domain: &str) -> Option<std::borrow::Cow<'_
 pub fn validate_blocklist(blocklist_path: &str, protected_path: &str) -> Result<(), String> {
     let blocklist = load_domain_lines(blocklist_path)?;
     let protected = load_domain_lines(protected_path)?;
-    let mut blocked_legitimate: Vec<_> = blocklist.intersection(&protected).cloned().collect();
-    blocked_legitimate.sort();
-    if blocked_legitimate.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Blocklist contains legitimate domains: {}",
-            blocked_legitimate.join(", ")
-        ))
-    }
+    ensure_no_protected_domains(&blocklist, &protected)
 }
 
 #[derive(Clone)]
@@ -364,23 +346,21 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
-    fn test_load_domains_from_file() -> Result<(), AppError> {
-        let mut file = NamedTempFile::new().map_err(|e| AppError::Internal(e.to_string()))?;
+    fn test_load_domains_from_file() {
+        let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "example.com").unwrap();
         writeln!(file, "  SPAM.ORG  ").unwrap();
         writeln!(file, "# comment").unwrap();
         writeln!(file).unwrap();
         writeln!(file, "disposable.net").unwrap();
 
-        let domains = load_domains_from_file(file.path().to_str().unwrap())?;
+        let domains = load_domain_lines(file.path().to_str().unwrap()).unwrap();
 
         assert_eq!(domains.len(), 3);
         assert!(domains.contains("example.com"));
         assert!(domains.contains("spam.org"));
         assert!(domains.contains("disposable.net"));
         assert!(!domains.contains("# comment"));
-
-        Ok(())
     }
 
     #[test]
@@ -442,7 +422,7 @@ mod tests {
     fn blocklist_loader_rejects_malformed_entries() {
         let blocklist = NamedTempFile::new().unwrap();
         std::fs::write(blocklist.path(), "valid.example\nnot a domain\n").unwrap();
-        assert!(load_domains_from_file(blocklist.path().to_str().unwrap()).is_err());
+        assert!(load_domain_lines(blocklist.path().to_str().unwrap()).is_err());
     }
 
     #[tokio::test]

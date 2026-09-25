@@ -50,17 +50,21 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Verify reviewed head matches the successful CI run
+      - name: Verify PR is ready and matches the successful CI run
         id: head_check
-        if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
         run: |
-          current_head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
-          if [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
+          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          current_head=$(jq -r .head.sha <<< "$pr")
+          is_draft=$(jq -r .draft <<< "$pr")
+          if [ "$is_draft" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cururu skips draft PRs until they are marked ready for review."
+          elif [ -n "$EXPECTED_HEAD_SHA" ] && [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::PR head changed after CI; skipping review of an unvalidated revision."
           else
