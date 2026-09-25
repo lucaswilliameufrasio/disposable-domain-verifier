@@ -39,6 +39,22 @@ jobs:
       checks: read
     runs-on: ubuntu-latest
     steps:
+      - name: Verify reviewed head matches the successful CI run
+        id: head_check
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
+        run: |
+          current_head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          if [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR head changed after CI; skipping review of an unvalidated revision."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Check LLM API key
         id: llm_key
         env:
@@ -51,7 +67,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Review PR
-        if: steps.llm_key.outputs.skip == 'false'
+        if: steps.llm_key.outputs.skip == 'false' && steps.head_check.outputs.skip != 'true'
         uses: lucaswilliameufrasio/cururu@0a9ecbfe978963a82086f5690b5f84b40c77738c # v4.6.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
