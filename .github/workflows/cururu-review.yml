@@ -170,23 +170,28 @@ jobs:
           blocklist_additions = set()
           protected_additions = set()
           protected_deletions = set()
-          current_file = None
+          protected_renames = []
+          old_file = None
+          new_file = None
           for line in diff.splitlines():
               if line.startswith("diff --git "):
-                  current_file = line.split(" b/", 1)[1]
+                  old_path, new_path = line[len("diff --git "):].split(" b/", 1)
+                  old_file = old_path.removeprefix("a/")
+                  new_file = new_path
+                  if old_file in {"assets/blocklist.txt", "assets/legitimate-domains.txt"} and old_file != new_file:
+                      protected_renames.append(f"{old_file} -> {new_file}")
               elif line.startswith(("+++", "---")):
                   continue
               elif line.startswith("+") or line.startswith("-"):
                   value = line[1:].strip().lower()
                   if not value or value.startswith("#"):
                       continue
-                  if current_file == "assets/blocklist.txt" and line.startswith("+"):
+                  if new_file == "assets/blocklist.txt" and line.startswith("+"):
                       blocklist_additions.add(value)
-                  elif current_file == "assets/legitimate-domains.txt":
-                      if line.startswith("+"):
-                          protected_additions.add(value)
-                      else:
-                          protected_deletions.add(value)
+                  if new_file == "assets/legitimate-domains.txt" and line.startswith("+"):
+                      protected_additions.add(value)
+                  if old_file == "assets/legitimate-domains.txt" and line.startswith("-"):
+                      protected_deletions.add(value)
 
           def valid_domain(domain):
               if len(domain) > 253:
@@ -209,7 +214,9 @@ jobs:
           removed_protected = sorted(base_protected & protected_deletions)
           invalid_additions = sorted(domain for domain in blocklist_additions if not valid_domain(domain))
           protected_hits = sorted(blocklist_additions & (base_protected | protected_additions))
-          if removed_protected or invalid_additions or protected_hits:
+          if protected_renames or removed_protected or invalid_additions or protected_hits:
+              if protected_renames:
+                  print("Protected files cannot be renamed: " + ", ".join(protected_renames))
               if removed_protected:
                   print("Protected domains cannot be removed: " + ", ".join(removed_protected))
               if invalid_additions:
