@@ -61,7 +61,10 @@ jobs:
           WORKFLOW_EVENT: ${{ github.event_name }}
           CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
-          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          if ! pr=$(timeout 30s gh api "repos/$REPOSITORY/pulls/$PR_NUMBER"); then
+            echo "::error::Could not read PR metadata from GitHub within 30 seconds."
+            exit 1
+          fi
           current_head=$(jq -r .head.sha <<< "$pr")
           is_draft=$(jq -r .draft <<< "$pr")
           echo "head_sha=$current_head" >> "$GITHUB_OUTPUT"
@@ -122,7 +125,10 @@ jobs:
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
           EXPECTED_HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
         run: |
-          current_head=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          if ! current_head=$(timeout 30s gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha); then
+            echo "::error::Could not recheck the PR head with GitHub within 30 seconds."
+            exit 1
+          fi
           if [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
             echo "::error::PR head changed while Cururu was reviewing; this review does not validate the current head."
             exit 1
@@ -151,10 +157,16 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          diff = subprocess.run(
-              ["gh", "pr", "diff", os.environ["PR_NUMBER"], "--repo", os.environ["REPOSITORY"]],
-              check=True, capture_output=True, text=True,
-          ).stdout
+          try:
+              diff_result = subprocess.run(
+                  ["gh", "pr", "diff", os.environ["PR_NUMBER"], "--repo", os.environ["REPOSITORY"]],
+                  check=True, capture_output=True, text=True, timeout=30,
+              )
+          except subprocess.TimeoutExpired as error:
+              raise SystemExit("Timed out fetching PR diff from GitHub after 30 seconds") from error
+          except subprocess.CalledProcessError as error:
+              raise SystemExit(f"gh pr diff failed with exit code {error.returncode}") from error
+          diff = diff_result.stdout
           blocklist_additions = set()
           protected_additions = set()
           protected_deletions = set()
