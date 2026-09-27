@@ -57,10 +57,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
+          WORKFLOW_EVENT: ${{ github.event_name }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
           current_head=$(jq -r .head.sha <<< "$pr")
           is_draft=$(jq -r .draft <<< "$pr")
+          echo "head_sha=$current_head" >> "$GITHUB_OUTPUT"
           if [ "$is_draft" = "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Cururu skips draft PRs until they are marked ready for review."
@@ -70,6 +73,33 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Prepare trusted Cururu analysis manifest
+        if: steps.llm_key.outputs.skip == 'false' && steps.head_check.outputs.skip != 'true'
+        env:
+          HEAD_SHA: ${{ steps.head_check.outputs.head_sha }}
+          WORKFLOW_EVENT: ${{ github.event_name }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          mkdir -p artifacts
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          if os.environ["WORKFLOW_EVENT"] == "workflow_run" and os.environ["CI_CONCLUSION"] == "success":
+              status = "passed"
+              message = "The required CI workflow passed for this pull request revision."
+          else:
+              status = "not_run"
+              message = "This was a manually requested Cururu review, not a CI completion event."
+
+          manifest = {
+              "schema_version": 1,
+              "commit_sha": os.environ["HEAD_SHA"],
+              "tools": [{"name": "CI", "status": status, "exit_code": 0, "message": message}],
+          }
+          Path("artifacts/analysis.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
       - name: Review PR
         id: cururu_review
         if: steps.llm_key.outputs.skip == 'false' && steps.head_check.outputs.skip != 'true'
