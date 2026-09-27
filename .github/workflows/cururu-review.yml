@@ -73,10 +73,11 @@ jobs:
       - name: Review PR
         id: cururu_review
         if: steps.llm_key.outputs.skip == 'false' && steps.head_check.outputs.skip != 'true'
-        uses: lucaswilliameufrasio/cururu@0a9ecbfe978963a82086f5690b5f84b40c77738c # v4.6.0
+        uses: lucaswilliameufrasio/cururu@27a3ba6039972ff86f0fa810e9336cc3a9e44859 # v4.7.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
+          llm_model: openai/gpt-6-luna
           pr_number: ${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number }}
       - name: Ensure PR stayed on the CI-tested head during review
         if: >-
