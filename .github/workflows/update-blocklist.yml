@@ -9,9 +9,10 @@ jobs:
   update-blocklist:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
-      actions: write
+      issues: write
+      checks: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,23 +31,57 @@ jobs:
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
 
       - name: Test (validates updated blocklist loads)
+        id: candidate_tests
         run: |
           cargo test
           cargo test blocklist_validator_
 
+      - name: Detect blocklist changes
+        id: candidate_diff
+        run: |
+          if git diff --quiet -- assets/blocklist.txt; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify blocklist App configuration
+        if: steps.candidate_diff.outputs.changed == 'true'
+        env:
+          APP_ID: ${{ vars.BLOCKLIST_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.BLOCKLIST_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APP_ID" ] || [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::Configure repository variable BLOCKLIST_APP_ID and secret BLOCKLIST_APP_PRIVATE_KEY before enabling automated blocklist merges."
+            exit 1
+          fi
+
+      - name: Create scoped blocklist automation token
+        if: steps.candidate_diff.outputs.changed == 'true'
+        id: blocklist_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.BLOCKLIST_APP_ID }}
+          private-key: ${{ secrets.BLOCKLIST_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: disposable-domain-verifier
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
       - name: Create Pull Request
+        if: steps.candidate_diff.outputs.changed == 'true'
         id: create_pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.blocklist_app.outputs.token }}
           commit-message: "chore(assets): update disposable domains blocklist"
           title: "chore: update disposable domains blocklist"
-          draft: true
+          draft: false
           body: |
             Automated update of the disposable domains blocklist.
             
-            This PR updates `assets/blocklist.txt` with the latest data from the upstream source.
-            Sanity checks (file size, presence of common domains like gmail.com, etc.) were performed before updating.
+            This PR is automatically merged only after the blocklist safety checks, Rust tests, and Cururu review pass.
           branch: "automation/update-blocklist"
           base: "main"
           delete-branch: true
@@ -54,9 +89,102 @@ jobs:
             automated-pr
             dependencies
 
-      - name: Trigger Cururu review
+      - name: Require Cururu API key for an update PR
         if: steps.create_pr.outputs.pull-request-number != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::error::LLM_API_KEY is required to review and merge an automated blocklist update."
+            exit 1
+          fi
+
+      - name: Verify PR only changes the blocklist
+        if: steps.create_pr.outputs.pull-request-number != ''
+        id: pr_head
+        env:
+          GH_TOKEN: ${{ steps.blocklist_app.outputs.token }}
+          APP_SLUG: ${{ steps.blocklist_app.outputs.app-slug }}
           PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
-        run: gh workflow run cururu-review.yml --ref main --field pr_number="$PR_NUMBER"
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          files=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename' | sort)
+          author=$(jq -r '.user.login' <<< "$pr")
+          expected_author="${APP_SLUG}[bot]"
+          head_branch=$(jq -r '.head.ref' <<< "$pr")
+          base_branch=$(jq -r '.base.ref' <<< "$pr")
+          if [ "$files" != "assets/blocklist.txt" ] ||
+             [ "$author" != "$expected_author" ] ||
+             [ "$head_branch" != "automation/update-blocklist" ] ||
+             [ "$base_branch" != "main" ]; then
+            echo "::error::Refusing to merge PR outside the expected blocklist App change (author=$author, branch=$head_branch -> $base_branch, files=$files)."
+            exit 1
+          fi
+          head_sha=$(jq -r '.head.sha' <<< "$pr")
+          local_blob=$(git hash-object assets/blocklist.txt)
+          remote_blob=$(gh api "repos/$REPOSITORY/contents/assets/blocklist.txt?ref=$head_sha" --jq .sha)
+          if [ "$local_blob" != "$remote_blob" ]; then
+            echo "::error::PR blocklist differs from the candidate that passed validation; refusing to review or merge."
+            exit 1
+          fi
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare trusted validation manifest
+        if: >-
+          success() && steps.candidate_tests.outcome == 'success' &&
+          steps.pr_head.outcome == 'success' &&
+          steps.create_pr.outputs.pull-request-number != ''
+        env:
+          HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
+        run: |
+          mkdir -p artifacts
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = {
+              "schema_version": 1,
+              "commit_sha": os.environ["HEAD_SHA"],
+              "tools": [
+                  {"name": "blocklist-validation", "status": "passed", "exit_code": 0,
+                   "message": "The upstream list passed syntax, size, known-domain, and protected-domain checks."},
+                  {"name": "cargo-test", "status": "passed", "exit_code": 0,
+                   "message": "cargo test passed against the candidate blocklist."},
+              ],
+          }
+          Path("artifacts/analysis.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Review blocklist PR with Cururu
+        if: >-
+          success() && steps.candidate_tests.outcome == 'success' &&
+          steps.pr_head.outcome == 'success' &&
+          steps.create_pr.outputs.pull-request-number != ''
+        id: cururu_review
+        uses: lucaswilliameufrasio/cururu@9a546f7242706bfe8a1644a14914998af092c622 # v4.9.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          llm_api_key: ${{ secrets.LLM_API_KEY }}
+          llm_model: openai/gpt-6-luna
+          pr_number: ${{ steps.create_pr.outputs.pull-request-number }}
+          expected_head_sha: ${{ steps.pr_head.outputs.head_sha }}
+          cururu_fail_on: high
+
+      - name: Merge reviewed blocklist PR
+        if: >-
+          success() && steps.candidate_tests.outcome == 'success' &&
+          steps.cururu_review.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.blocklist_app.outputs.token }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          current_head=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)
+          if [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::error::PR head changed during Cururu review; refusing to merge."
+            exit 1
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --squash --delete-branch --match-head-commit "$EXPECTED_HEAD_SHA"
