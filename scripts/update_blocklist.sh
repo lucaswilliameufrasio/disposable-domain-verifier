@@ -6,7 +6,7 @@ ASSETS_PATH="assets/blocklist.txt"
 TEMP_FILE="assets/blocklist.tmp"
 
 echo "Downloading latest blocklist..."
-curl -sSL "$BLOCKLIST_URL" -o "$TEMP_FILE"
+curl --fail --silent --show-error --location --connect-timeout 15 --max-time 120 "$BLOCKLIST_URL" -o "$TEMP_FILE"
 
 # Sanity Check 1: File size (must be at least 10KB and less than 10MB)
 FILE_SIZE=$(wc -c <"$TEMP_FILE")
