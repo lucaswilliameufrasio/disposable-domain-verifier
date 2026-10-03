@@ -43,6 +43,7 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "candidate_blob=$(git hash-object assets/blocklist.txt)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify blocklist App configuration
@@ -107,6 +108,7 @@ jobs:
           APP_SLUG: ${{ steps.blocklist_app.outputs.app-slug }}
           PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
           REPOSITORY: ${{ github.repository }}
+          CANDIDATE_BLOB: ${{ steps.candidate_diff.outputs.candidate_blob }}
         run: |
           pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
           files=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename' | sort)
@@ -122,9 +124,8 @@ jobs:
             exit 1
           fi
           head_sha=$(jq -r '.head.sha' <<< "$pr")
-          local_blob=$(git hash-object assets/blocklist.txt)
           remote_blob=$(gh api "repos/$REPOSITORY/contents/assets/blocklist.txt?ref=$head_sha" --jq .sha)
-          if [ "$local_blob" != "$remote_blob" ]; then
+          if [ "$CANDIDATE_BLOB" != "$remote_blob" ]; then
             echo "::error::PR blocklist differs from the candidate that passed validation; refusing to review or merge."
             exit 1
           fi
