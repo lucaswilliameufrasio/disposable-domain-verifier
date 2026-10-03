@@ -76,6 +76,8 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ steps.blocklist_app.outputs.token }}
+          author: "${{ steps.blocklist_app.outputs.app-slug }}[bot] <${{ vars.BLOCKLIST_APP_ID }}+${{ steps.blocklist_app.outputs.app-slug }}[bot]@users.noreply.github.com>"
+          committer: "${{ steps.blocklist_app.outputs.app-slug }}[bot] <${{ vars.BLOCKLIST_APP_ID }}+${{ steps.blocklist_app.outputs.app-slug }}[bot]@users.noreply.github.com>"
           commit-message: "chore(assets): update disposable domains blocklist"
           title: "chore: update disposable domains blocklist"
           draft: false
