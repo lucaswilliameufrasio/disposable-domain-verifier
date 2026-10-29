@@ -20,7 +20,7 @@ cargo run --release
 # Deploy to a VPS
 
 With Cargo locally and a rootless Docker daemon on the VPS, run `make deploy`. The
-interactive script asks for an SSH alias from `~/.ssh/config`, host port, and
+interactive Rust CLI asks for an SSH alias from `~/.ssh/config`, host port, and
 remote IPv4 bind address; it has no default host. It builds the Rust production
 image for the VPS CPU and streams it over SSH. The bind defaults to loopback;
 to reach it from a reverse proxy on another host, enter the VPS's private or
