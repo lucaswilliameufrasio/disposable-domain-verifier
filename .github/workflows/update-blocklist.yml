@@ -160,6 +160,22 @@ jobs:
           Path("artifacts/analysis.json").write_text(json.dumps(manifest, indent=2) + "\n")
           PY
 
+      # Blocklist diffs are a single sorted file with many scattered hunks, so they
+      # easily exceed the per-file chunk limit tuned for code PRs. Raise the limits
+      # only in this runner's copy of .cururu.toml (Cururu reads it from the workspace);
+      # the PR was already created above, so this edit is never committed.
+      - name: Raise Cururu diff limits for blocklist review
+        if: >-
+          success() && steps.candidate_tests.outcome == 'success' &&
+          steps.pr_head.outcome == 'success' &&
+          steps.create_pr.outputs.pull-request-number != ''
+        run: |
+          sed -i -E \
+            -e 's/^max_diff_bytes = .*/max_diff_bytes = 200000/' \
+            -e 's/^chunk_bytes = .*/chunk_bytes = 200000/' \
+            .cururu.toml
+          grep -E '^(max_diff_bytes|chunk_bytes) = 200000$' .cururu.toml | wc -l | grep -qx 2
+
       - name: Review blocklist PR with Cururu
         if: >-
           success() && steps.candidate_tests.outcome == 'success' &&
@@ -174,6 +190,34 @@ jobs:
           pr_number: ${{ steps.create_pr.outputs.pull-request-number }}
           expected_head_sha: ${{ steps.pr_head.outputs.head_sha }}
           cururu_fail_on: high
+
+      - name: Wait for PR safety checks and CI
+        if: >-
+          success() && steps.candidate_tests.outcome == 'success' &&
+          steps.cururu_review.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          # The merge below bypasses the approval rule, so require the PR's own
+          # safety and CI checks to succeed on the exact head being merged.
+          for attempt in $(seq 1 60); do
+            runs=$(gh api "repos/$REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs')
+            pending=0
+            for name in blocklist-safety check; do
+              status=$(jq -r --arg n "$name" '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end' <<< "$runs")
+              case "$status" in
+                completed:success) ;;
+                completed:*) echo "::error::Check '$name' finished as ${status#completed:}; refusing to merge."; exit 1 ;;
+                *) pending=1 ;;
+              esac
+            done
+            [ "$pending" = 0 ] && { echo "Required PR checks passed."; exit 0; }
+            sleep 15
+          done
+          echo "::error::Timed out waiting for blocklist-safety and CI checks."
+          exit 1
 
       - name: Merge reviewed blocklist PR
         if: >-
@@ -190,4 +234,7 @@ jobs:
             echo "::error::PR head changed during Cururu review; refusing to merge."
             exit 1
           fi
-          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --squash --delete-branch --match-head-commit "$EXPECTED_HEAD_SHA"
+          # The main ruleset only allows merge commits and requires an approval the
+          # bot cannot give itself; the blocklist App is a ruleset bypass actor, and
+          # --admin makes gh use that bypass instead of refusing client-side.
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --merge --admin --delete-branch --match-head-commit "$EXPECTED_HEAD_SHA"
