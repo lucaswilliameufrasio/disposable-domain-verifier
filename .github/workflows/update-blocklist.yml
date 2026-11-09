@@ -160,22 +160,6 @@ jobs:
           Path("artifacts/analysis.json").write_text(json.dumps(manifest, indent=2) + "\n")
           PY
 
-      # Blocklist diffs are a single sorted file with many scattered hunks, so they
-      # easily exceed the per-file chunk limit tuned for code PRs. Raise the limits
-      # only in this runner's copy of .cururu.toml (Cururu reads it from the workspace);
-      # the PR was already created above, so this edit is never committed.
-      - name: Raise Cururu diff limits for blocklist review
-        if: >-
-          success() && steps.candidate_tests.outcome == 'success' &&
-          steps.pr_head.outcome == 'success' &&
-          steps.create_pr.outputs.pull-request-number != ''
-        run: |
-          sed -i -E \
-            -e 's/^max_diff_bytes = .*/max_diff_bytes = 200000/' \
-            -e 's/^chunk_bytes = .*/chunk_bytes = 200000/' \
-            .cururu.toml
-          grep -E '^(max_diff_bytes|chunk_bytes) = 200000$' .cururu.toml | wc -l | grep -qx 2
-
       - name: Review blocklist PR with Cururu
         if: >-
           success() && steps.candidate_tests.outcome == 'success' &&
