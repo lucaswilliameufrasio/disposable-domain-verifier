@@ -6,7 +6,7 @@ model = "openai/gpt-6-luna"
 
 [review]
 max_diff_bytes = 180000
-chunk_bytes = 60000
+chunk_bytes = 180000
 ignore = ["**/Cargo.lock"]
 language = "pt-BR"
 comment_mode = "inline"
