@@ -209,7 +209,19 @@ jobs:
             if [ "$missing" = 1 ] && [ "$retriggered" = 0 ] && [ "$attempt" -ge 4 ]; then
               echo "::notice::No check run for this head after 45s; reopening the PR to start them."
               GH_TOKEN="$APP_TOKEN" gh pr close "$PR_NUMBER" --repo "$REPOSITORY"
-              GH_TOKEN="$APP_TOKEN" gh pr reopen "$PR_NUMBER" --repo "$REPOSITORY"
+              # Never leave the PR closed: retry the reopen before giving up.
+              reopened=0
+              for try in 1 2 3 4 5; do
+                if GH_TOKEN="$APP_TOKEN" gh pr reopen "$PR_NUMBER" --repo "$REPOSITORY"; then
+                  reopened=1
+                  break
+                fi
+                sleep 10
+              done
+              if [ "$reopened" = 0 ]; then
+                echo "::error::Closed PR #$PR_NUMBER to restart its checks but could not reopen it; reopen it manually."
+                exit 1
+              fi
               retriggered=1
             fi
             sleep 15
