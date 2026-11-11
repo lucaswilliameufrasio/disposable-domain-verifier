@@ -181,23 +181,37 @@ jobs:
           steps.cururu_review.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_TOKEN: ${{ steps.blocklist_app.outputs.token }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
           HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           # The merge below bypasses the approval rule, so require the PR's own
           # safety and CI checks to succeed on the exact head being merged.
+          retriggered=0
           for attempt in $(seq 1 60); do
             runs=$(gh api "repos/$REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs')
             pending=0
+            missing=0
             for name in blocklist-safety check; do
               status=$(jq -r --arg n "$name" '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end' <<< "$runs")
               case "$status" in
                 completed:success) ;;
                 completed:*) echo "::error::Check '$name' finished as ${status#completed:}; refusing to merge."; exit 1 ;;
+                missing) pending=1; missing=1 ;;
                 *) pending=1 ;;
               esac
             done
             [ "$pending" = 0 ] && { echo "Required PR checks passed."; exit 0; }
+            # When the branch already holds this head (no new push) or GitHub dropped
+            # the push event, the checks never start. Close and reopen the PR once as
+            # the App so the `reopened` event starts them on the same head.
+            if [ "$missing" = 1 ] && [ "$retriggered" = 0 ] && [ "$attempt" -ge 4 ]; then
+              echo "::notice::No check run for this head after 45s; reopening the PR to start them."
+              GH_TOKEN="$APP_TOKEN" gh pr close "$PR_NUMBER" --repo "$REPOSITORY"
+              GH_TOKEN="$APP_TOKEN" gh pr reopen "$PR_NUMBER" --repo "$REPOSITORY"
+              retriggered=1
+            fi
             sleep 15
           done
           echo "::error::Timed out waiting for blocklist-safety and CI checks."
