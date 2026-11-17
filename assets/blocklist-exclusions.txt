@@ -1,0 +1,15 @@
+# Exact-match exceptions, reviewed on 2026-11-16. Do not block shared
+# registration suffixes or permanent forwarding services.
+asso.st
+f5.si
+fr.nf
+infos.st
+it.com
+kro.kr
+n-e.kr
+spamgourmet.com
+zone.id
+# Disputed false-positive reports; exclude until the ownership conflict is resolved.
+shopeeboost.com
+waroengin.com
+waroengkuy.com
