@@ -20,13 +20,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master @ 2026-09-22
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
         with:
-          toolchain: 1.98.1
+          toolchain: 1.100.0
           components: clippy,rustfmt
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Format
         run: cargo fmt --check
@@ -39,6 +39,9 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Test blocklist updater
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
       - name: Compile benchmarks
         run: cargo bench --bench verify_lookup --no-run
