@@ -32,6 +32,29 @@ This is not a controlled cold CI comparison. The Python reference's in-memory
 candidate build on the same downloaded snapshots took a median of 61.972 ms
 over 20 iterations. The Rust candidate matched its output byte-for-byte.
 
+The draft PR's first GitHub Actions CI run at commit `b1d284a` took 96 seconds
+from job setup to completion. Its new Rust updater test step took 30 seconds,
+including compilation; this is not the scheduled update workflow and is not a
+controlled cold-versus-warm experiment.
+
+## Prebuilt release option
+
+Publishing the updater as a release asset could remove its compilation from
+the scheduled update job. This repository had no GitHub releases or
+release-publishing workflow when checked on 2026-11-18, so it would first need
+a release process. A tag or `latest` URL alone is not sufficient to establish
+what code is being executed.
+
+Before adopting a prebuilt updater, define and test a trusted release process:
+bind the artifact to its source revision and dependencies, verify provenance
+and integrity before execution, pin the intended release and expected
+artifact identity in trusted repository configuration, and fail closed when
+verification fails or updater source changes without a corresponding release.
+Account for architecture and availability, and never fall back silently to an
+older or unverified binary. The current scheduled workflow also runs Rust
+tests of the application; a prebuilt updater does not remove that separate
+compilation. Measure the complete job, not only updater startup.
+
 ## Before replacing the existing scripts
 
 - Complete differential and integration coverage for all success, failure,
