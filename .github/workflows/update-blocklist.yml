@@ -61,7 +61,7 @@ jobs:
       - name: Create scoped blocklist automation token
         if: steps.candidate_diff.outputs.changed == 'true'
         id: blocklist_app
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           app-id: ${{ vars.BLOCKLIST_APP_ID }}
           private-key: ${{ secrets.BLOCKLIST_APP_PRIVATE_KEY }}
@@ -169,7 +169,7 @@ jobs:
           steps.pr_head.outcome == 'success' &&
           steps.create_pr.outputs.pull-request-number != ''
         id: cururu_review
-        uses: lucaswilliameufrasio/cururu@9a546f7242706bfe8a1644a14914998af092c622 # v4.9.0
+        uses: lucaswilliameufrasio/cururu@ad5b59bc6c2fdf97b66085d43a251d857aa78565 # v6.2.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
