@@ -15,6 +15,9 @@ tower-http = { version = "0.7.1", features = ["trace"] }
 ahash = "0.8"
 arc-swap = "1.9"
 mimalloc = "0.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
+sha2 = { version = "0.11.1", optional = true }
+tempfile = { version = "3", optional = true }
 
 [profile.release]
 opt-level = 3
@@ -32,3 +35,11 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 [[bench]]
 name = "verify_lookup"
 harness = false
+
+[features]
+blocklist-updater = ["dep:reqwest", "dep:sha2", "dep:tempfile"]
+
+[[bin]]
+name = "update-blocklist"
+path = "src/bin/update_blocklist.rs"
+required-features = ["blocklist-updater"]

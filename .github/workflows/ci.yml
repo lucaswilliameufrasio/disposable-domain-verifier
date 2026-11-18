@@ -43,5 +43,8 @@ jobs:
       - name: Test blocklist updater
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
+      - name: Test experimental Rust blocklist updater
+        run: cargo test --features blocklist-updater --bin update-blocklist
+
       - name: Compile benchmarks
         run: cargo bench --bench verify_lookup --no-run
