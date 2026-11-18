@@ -20,12 +20,11 @@ permissions:
   pull-requests: write
   issues: write
 
-concurrency:
-  group: cururu-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   review:
+    concurrency:
+      group: cururu-review-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number || inputs.pr_number || github.run_id }}
+      cancel-in-progress: true
     if: >-
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
@@ -137,6 +136,9 @@ jobs:
           fi
 
   blocklist-safety:
+    concurrency:
+      group: cururu-safety-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
     if: github.event_name == 'pull_request_target'
     permissions:
       contents: read
