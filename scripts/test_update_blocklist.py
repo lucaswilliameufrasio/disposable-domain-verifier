@@ -167,6 +167,10 @@ class UpdateBlocklistTests(unittest.TestCase):
         self.assertNotIn("gh pr merge", workflow)
         self.assertNotIn("--admin", workflow)
 
+    def test_review_workflow_separates_concurrency_by_event(self):
+        workflow = (updater.ROOT / ".github/workflows/cururu-review.yml").read_text()
+        self.assertIn("group: cururu-${{ github.event_name }}-", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
