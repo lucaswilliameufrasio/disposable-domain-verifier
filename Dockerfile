@@ -5,7 +5,7 @@ ARG RUST_VERSION=1.100.0
 # ---- chef: rust toolchain + cargo-chef, cached as its own layer ----
 FROM rust:${RUST_VERSION}-slim-trixie AS chef
 WORKDIR /app
-RUN cargo install --locked cargo-chef@0.1.77
+RUN cargo install --locked cargo-chef@0.1.78
 
 # ---- planner: figure out the dependency "recipe" ----
 FROM chef AS planner
