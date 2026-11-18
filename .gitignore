@@ -20,3 +20,7 @@ target/
 .DS_Store
 
 .wrangler/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
