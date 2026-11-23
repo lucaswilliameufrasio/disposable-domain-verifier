@@ -342,6 +342,28 @@ mod tests {
             )
             .is_err()
         );
+        let minimum_two = Source { min: 2, ..source() };
+        let repeated = payload("mailinator.com\nMAILINATOR.COM");
+        let error = build(&[(&minimum_two, &repeated)], b"", b"", &protected(), b"").unwrap_err();
+        assert!(error.contains("count outside limits: 1"), "{error}");
+
+        let old = format!(
+            "mailinator.com\n{}\n",
+            (0..1001)
+                .map(|i| format!("old{i}.example"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let small = payload("mailinator.com");
+        let error = build(
+            &[(&source(), &small)],
+            old.as_bytes(),
+            b"",
+            &protected(),
+            b"",
+        )
+        .unwrap_err();
+        assert!(error.contains("Abnormal change"), "{error}");
     }
 
     #[tokio::test]
