@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,8 +43,34 @@ jobs:
       - name: Test blocklist updater
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
-      - name: Test experimental Rust blocklist updater
-        run: cargo test --features blocklist-updater --bin update-blocklist
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
+        with:
+          toolchain: 1.100.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Compile benchmarks
         run: cargo bench --bench verify_lookup --no-run
+
+  # Keep the existing required check and the blocklist merge gate stable.
+  check:
+    if: ${{ always() }}
+    needs: [validate, benchmarks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both CI jobs to succeed
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          BENCHMARKS_RESULT: ${{ needs.benchmarks.result }}
+        run: |
+          if [[ "$VALIDATE_RESULT" != success || "$BENCHMARKS_RESULT" != success ]]; then
+            echo "::error::Validation: $VALIDATE_RESULT; benchmark compilation: $BENCHMARKS_RESULT"
+            exit 1
+          fi

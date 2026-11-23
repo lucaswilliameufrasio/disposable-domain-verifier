@@ -1,8 +1,8 @@
 # Rust blocklist updater: experimental migration
 
-This is a draft, not a cutover. The scheduled workflow continues to use the
-Python updater and its tests. Do not remove or disable it until the Rust
-candidate has complete behavioral coverage and the full workflow is measured.
+The scheduled workflow continues to use the Python updater and its tests.
+The Rust updater remains available for experiments but is not on the
+scheduled workflow's critical path.
 
 The candidate is isolated behind the `blocklist-updater` Cargo feature. Run
 its local tests with:
@@ -105,7 +105,24 @@ The setting and ruleset updates are administrative changes, separate from
 this draft and from any one-time administrative merge. Native auto-merge
 automates integration *after* approval; it does not approve an unattended PR.
 
-## Before replacing the existing scripts
+## Decision after the attested trial
+
+In [run 45114608010](https://github.com/lucaswilliameufrasio/disposable-domain-verifier/actions/runs/45114608010),
+the Python and attested Rust paths used identical upstream inputs and produced
+the same blocklist. The consumer jobs took 48 s (Python) and 46 s (Rust);
+candidate generation including required setup took 4 s and 5 s, respectively.
+One comparison does not demonstrate an end-to-end gain, so keep Python for
+scheduled runs. The separate manual release rehearsal remains available.
+
+The [live blocklist run](https://github.com/lucaswilliameufrasio/disposable-domain-verifier/actions/runs/45107297962)
+took 97 s, with 29 s of review and 31 s waiting for checks. The PR CI spent
+22 s compiling benchmarks. As an alternative, split benchmark compilation
+from validation, retain the required `check` name for the aggregate job, and
+require explicit success from both jobs. Compare `check` completion times
+before and after under similar cache conditions; do not treat a single run
+as evidence of improvement.
+
+## Before reconsidering replacement of the existing scripts
 
 - Complete differential and integration coverage for all success, failure,
   timeout, malformed input, size, protected-domain, exclusion, atomic write,
