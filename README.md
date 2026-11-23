@@ -280,6 +280,8 @@ same 100 domains. It measures HTTP request and response bytes (including
 headers), and p50/p95 time per group of 100, including client decoding.
 It uses sequential requests with keep-alive on loopback, without TLS, a
 proxy, or HTTP compression. It does not measure production capacity.
+The default loopback is `::1`; pass `--host 127.0.0.1` for IPv4 loopback
+when the local server accepts IPv4 connections.
 
 To measure batch p99 and throughput under concurrent load, build and run
 the verifier locally in one terminal:

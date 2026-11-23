@@ -1,5 +1,6 @@
 """Compare HTTP request counts, bytes and latency for 100 lookups locally."""
 
+import argparse
 import json
 import math
 import os
@@ -65,9 +66,9 @@ def verify_results(scenario, bodies):
         raise RuntimeError(f"incorrect results: {scenario}")
 
 
-def sample(port, scenario, requests, count):
+def sample(host, port, scenario, requests, count):
     elapsed, transferred = [], []
-    with socket.create_connection(("::1", port), timeout=5) as conn, conn.makefile("rb") as reader:
+    with socket.create_connection((host, port), timeout=5) as conn, conn.makefile("rb") as reader:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         for _ in range(count):
             bodies = []
@@ -85,6 +86,9 @@ def sample(port, scenario, requests, count):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", choices=("::1", "127.0.0.1"), default="::1", help="loopback address (default: ::1)")
+    host = parser.parse_args().host
     blocklist = set((ROOT / "assets/blocklist.txt").read_text().splitlines())
     listed = iter(sorted(blocklist)[: DOMAIN_COUNT // 2])
     domains = [
@@ -98,8 +102,9 @@ def main():
         "batch-json": [request("POST", f"{PREFIX}/batch", payload)],
         "batch-bits": [request("POST", f"{PREFIX}/batch/compact", payload)],
     }
-    with socket.socket(socket.AF_INET6) as reservation:
-        reservation.bind(("::1", 0))
+    family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+    with socket.socket(family) as reservation:
+        reservation.bind((host, 0))
         port = reservation.getsockname()[1]
     with subprocess.Popen(
         [ROOT / "target/release/disposable-domain-verifier"],
@@ -110,7 +115,7 @@ def main():
                 if app.poll() is not None:
                     raise RuntimeError("server exited before startup")
                 try:
-                    with socket.create_connection(("::1", port), timeout=.2):
+                    with socket.create_connection((host, port), timeout=.2):
                         break
                 except OSError:
                     time.sleep(.02)
@@ -119,13 +124,13 @@ def main():
 
             results = {key: [] for key in scenarios}
             for key, requests in scenarios.items():
-                sample(port, key, requests, 20)
+                sample(host, port, key, requests, 20)
             order = list(scenarios)
             for index in range(ROUNDS):
                 offset = index % len(order)
                 for key in order[offset:] + order[:offset]:
-                    results[key].append(sample(port, key, scenarios[key], SAMPLES_PER_ROUND))
-            print(f"HTTP/1.1 loopback, keep-alive, {ROUNDS} rounds × {SAMPLES_PER_ROUND} samples/format")
+                    results[key].append(sample(host, port, key, scenarios[key], SAMPLES_PER_ROUND))
+            print(f"HTTP/1.1 loopback ({host}), keep-alive, {ROUNDS} rounds × {SAMPLES_PER_ROUND} samples/format")
             print("format          requests  HTTP bytes   p50 ms   p95 ms  (per 100 lookups)")
             for key, rows in results.items():
                 size, p50, p95 = (statistics.median(column) for column in zip(*rows))
