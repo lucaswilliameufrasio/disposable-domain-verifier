@@ -143,7 +143,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      statuses: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -231,15 +230,3 @@ jobs:
               raise SystemExit(1)
           print(f"Validated {len(blocklist_additions)} blocklist additions against {len(base_protected)} trusted protections.")
           PY
-      - name: Record that the automated blocklist gate does not apply
-        if: >-
-          github.event.pull_request.head.repo.full_name != github.repository ||
-          github.event.pull_request.head.ref != 'automation/update-blocklist'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=success -f context=cururu-validated \
-            -f description='Not an automated blocklist PR; human review still required' \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null

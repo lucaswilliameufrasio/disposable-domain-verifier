@@ -162,92 +162,78 @@ class UpdateBlocklistTests(unittest.TestCase):
         current = updater.parse((updater.ROOT / "assets/blocklist.txt").read_bytes(), "current")
         self.assertTrue(own <= current)
 
-    def test_workflow_does_not_merge_with_bypass(self):
+    def test_workflow_requires_all_checks_before_running_merge_script(self):
         workflow = (updater.ROOT / ".github/workflows/update-blocklist.yml").read_text()
-        self.assertNotIn("gh pr merge", workflow)
-        self.assertNotIn("--admin", workflow)
+        merge_step = workflow.split("- name: Merge reviewed blocklist update", 1)[1]
+        for gate in (
+            "steps.candidate_tests.outcome == 'success'",
+            "steps.pr_head.outcome == 'success'",
+            "steps.pr_checks.outcome == 'success'",
+            "steps.cururu_review.outcome == 'success'",
+            "steps.cururu_review.outputs.review_status == 'completed'",
+            "steps.cururu_review.outputs.quality_gate_passed == 'true'",
+            "steps.cururu_review.outputs.analysis_status == 'passed'",
+        ):
+            self.assertIn(gate, merge_step)
+        self.assertNotIn("BLOCKLIST_NATIVE_AUTO_MERGE", workflow)
 
-    def test_native_auto_merge_refuses_missing_policy_or_unreviewed_head(self):
-        import json
+    def test_merge_is_limited_to_expected_app_scope_head_and_base(self):
         import os
         import subprocess
 
-        checks = {"type": "required_status_checks", "ruleset_id": 20, "parameters": {
-            "strict_required_status_checks_policy": True,
-            "required_status_checks": [
-                {"context": name, "integration_id": 15368}
-                for name in ("check", "blocklist-safety", "cururu-validated")
-            ],
-        }}
-        approval = {"type": "pull_request", "ruleset_id": 10, "parameters": {
-            "required_approving_review_count": 1,
-            "dismiss_stale_reviews_on_push": True,
-            "allowed_merge_methods": ["merge"],
-        }}
-        script = updater.ROOT / ".github/scripts/arm-blocklist-auto-merge.sh"
+        script = updater.ROOT / ".github/scripts/merge-reviewed-blocklist.sh"
         with tempfile.TemporaryDirectory() as directory:
             fake_gh = Path(directory) / "gh"
             fake_gh.write_text("""#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
-endpoint = next(arg for arg in sys.argv[2:] if arg == "graphql" or arg.startswith("repos/"))
-if endpoint == "repos/test/repo":
-    print(os.environ["AUTO_ENABLED"])
-elif "/rules/" in endpoint:
-    print(os.environ["RULES"])
-elif "/rulesets/" in endpoint:
-    rule_id = endpoint.split("/rulesets/")[1].split("?")[0]
-    print(json.dumps(json.loads(os.environ["RULESET_DETAILS"])[rule_id]))
-elif endpoint.endswith("/pulls/42"):
+endpoint = next(arg for arg in sys.argv[2:] if arg.startswith("repos/"))
+if endpoint.endswith("/pulls/42"):
     repo = {"full_name": "test/repo"}
-    if ".head.sha" in sys.argv:
-        print(os.environ.get("FINAL_HEAD", os.environ["ACTUAL_HEAD"]))
-    else:
-        print(json.dumps({"node_id": "PR_1", "state": "open", "draft": False,
-            "user": {"login": "test-app[bot]"},
-            "head": {"repo": repo, "ref": "automation/update-blocklist", "sha": os.environ["ACTUAL_HEAD"]},
-            "base": {"repo": repo, "ref": "main"}}))
+    print(json.dumps({"state": "open", "draft": False,
+        "user": {"login": os.environ.get("ACTUAL_AUTHOR", "test-app[bot]")},
+        "head": {"repo": repo, "ref": "automation/update-blocklist",
+                 "sha": os.environ.get("ACTUAL_HEAD", "reviewed")},
+        "base": {"repo": repo, "ref": "main", "sha": "trusted-base"}}))
 elif endpoint.endswith("/files"):
-    print("assets/blocklist.txt")
+    print(os.environ.get("ACTUAL_FILES", "assets/blocklist.txt"))
 elif "/contents/" in endpoint:
-    print(os.environ["ACTUAL_BLOB"])
-elif endpoint == "graphql":
-    assert "enablePullRequestAutoMerge" in " ".join(sys.argv)
+    print(os.environ.get("ACTUAL_BLOB", "candidate"))
+elif "/commits/" in endpoint:
+    print(os.environ.get("PARENTS", "trusted-base"))
+elif endpoint.endswith("/branches/main"):
+    print(os.environ.get("ACTUAL_BASE", "trusted-base"))
+elif endpoint.endswith("/pulls/42/merge"):
+    assert "PUT" in sys.argv and "sha=reviewed" in sys.argv and "merge_method=merge" in sys.argv
     Path(os.environ["MUTATION_LOG"]).touch()
+    print(os.environ.get("MERGE_RESPONSE", '{"merged":true,"sha":"merge-commit"}'))
 else:
     sys.exit(f"Unexpected endpoint: {endpoint}")
 """)
             fake_gh.chmod(0o755)
-            marker = Path(directory) / "armed"
+            marker = Path(directory) / "merge-request"
             env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
-                       GITHUB_REPOSITORY="test/repo", APP_SLUG="test-app", APP_ID="123", PR_NUMBER="42",
-                       HEAD_SHA="reviewed", CANDIDATE_BLOB="candidate", MUTATION_LOG=str(marker))
-            visible = {"current_user_can_bypass": "never"}
-            bypass = {"current_user_can_bypass": "never", "bypass_actors": [
-                {"actor_type": "Integration", "actor_id": 123, "bypass_mode": "pull_request"},
-            ]}
-            for enabled, rules, actual, blob, details, should_arm in (
-                ("false", [approval, checks], "reviewed", "candidate", visible, False),
-                ("true", [checks], "reviewed", "candidate", visible, False),
-                ("true", [approval], "reviewed", "candidate", visible, False),
-                ("true", [approval, checks], "reviewed", "candidate", bypass, False),
-                ("true", [approval, checks], "reviewed", "candidate",
-                 {"current_user_can_bypass": "pull_requests_only"}, False),
-                ("true", [approval, checks], "reviewed", "candidate", {}, False),
-                ("true", [approval, checks], "unreviewed", "candidate", visible, False),
-                ("true", [approval, checks], "reviewed", "different", visible, False),
-                ("true", [approval, checks], "reviewed", "candidate", visible, True),
+                       GITHUB_REPOSITORY="test/repo", APP_SLUG="test-app", PR_NUMBER="42",
+                       GITHUB_SHA="trusted-base", HEAD_SHA="reviewed", CANDIDATE_BLOB="candidate",
+                       MUTATION_LOG=str(marker))
+            for overrides, should_request, should_succeed in (
+                ({"ACTUAL_AUTHOR": "other-user"}, False, False),
+                ({"ACTUAL_HEAD": "unreviewed"}, False, False),
+                ({"ACTUAL_FILES": "assets/blocklist.txt\n.github/workflows/ci.yml"}, False, False),
+                ({"ACTUAL_BLOB": "different"}, False, False),
+                ({"PARENTS": "trusted-base\nextra-parent"}, False, False),
+                ({"ACTUAL_BASE": "new-base"}, False, False),
+                ({"MERGE_RESPONSE": '{"merged":false}'}, True, False),
+                ({}, True, True),
             ):
-                with self.subTest(enabled=enabled, rules=rules, head=actual, blob=blob, details=details):
+                with self.subTest(overrides=overrides):
+                    marker.unlink(missing_ok=True)
                     result = subprocess.run(
                         ["bash", str(script)], check=False, capture_output=True, text=True,
-                        env=dict(env, AUTO_ENABLED=enabled, RULES=json.dumps([rules]),
-                                 RULESET_DETAILS=json.dumps({"10": visible, "20": details}),
-                                 ACTUAL_HEAD=actual, ACTUAL_BLOB=blob),
+                        env=dict(env, **overrides),
                     )
-                    self.assertEqual(marker.exists(), should_arm, result.stderr)
-                    if should_arm:
-                        self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(marker.exists(), should_request, result.stderr)
+                    self.assertEqual(result.returncode == 0, should_succeed, result.stderr)
 
     def test_review_and_safety_use_separate_concurrency_groups(self):
         workflow = (updater.ROOT / ".github/workflows/cururu-review.yml").read_text()

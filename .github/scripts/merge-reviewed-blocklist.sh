@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Only called after the current run validated the candidate and both PR checks.
+# Revalidate identity and content before using the App's PR-only exception.
+pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+if ! jq -e --arg repo "$GITHUB_REPOSITORY" --arg author "${APP_SLUG}[bot]" \
+    --arg head "$HEAD_SHA" --arg base "$GITHUB_SHA" '
+  .state == "open" and .draft == false and .user.login == $author
+  and .head.repo.full_name == $repo and .base.repo.full_name == $repo
+  and .head.ref == "automation/update-blocklist" and .base.ref == "main"
+  and .head.sha == $head and .base.sha == $base
+' <<< "$pr" >/dev/null; then
+  echo "::error::The PR is not the expected App update at the reviewed head and base."
+  exit 1
+fi
+
+files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+test "$files" = assets/blocklist.txt
+blob=$(gh api "repos/$GITHUB_REPOSITORY/contents/assets/blocklist.txt?ref=$HEAD_SHA" --jq .sha)
+test "$blob" = "$CANDIDATE_BLOB"
+parents=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA" --jq '.parents[].sha')
+test "$parents" = "$GITHUB_SHA"
+test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$GITHUB_SHA"
+
+# The API checks the head SHA atomically. If the head changed, do not retry
+# with the new head: it needs a fresh validation and review.
+gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/merge" \
+  -f sha="$HEAD_SHA" -f merge_method=merge | jq -e 'select(.merged == true) | {sha, merged}'

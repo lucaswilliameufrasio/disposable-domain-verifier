@@ -102,10 +102,14 @@ versus the previous checked-in list, SHA-256
 `173acb8aaf0997438e93dd69a049376f44cec8fa0e182d2d6abd548009c7396b`.
 This one-time migration exceeds normal variation limits; normal runs cannot
 accept a change of that size.
-The automated workflow tests and proposes
-updates, runs the existing checks and Cururu review, but does not merge: a
-human must review and merge according to repository rules. Removing an existing
-App's ruleset-bypass permission requires a separate repository settings change.
+The scheduled workflow on protected `main` tests and proposes updates. The
+blocklist App merges its own PR only when it changes `assets/blocklist.txt`
+alone and the exact candidate commit passes CI, `blocklist-safety`, and
+Cururu. It rechecks the author, branches, candidate blob, and base revision
+immediately before requesting a normal merge with the reviewed head SHA.
+If anything changes or a gate fails, the PR is left open. This uses the
+existing PR-only ruleset exception for the blocklist App; it does not change
+human approval for other PRs or rely on GitHub's native auto-merge setting.
 
 On 2026-11-16 the 3,201 initial additions were checked against the
 [Public Suffix List](https://publicsuffix.org/list/public_suffix_list.dat)
