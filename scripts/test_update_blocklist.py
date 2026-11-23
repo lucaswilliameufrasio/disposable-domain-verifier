@@ -167,6 +167,76 @@ class UpdateBlocklistTests(unittest.TestCase):
         self.assertNotIn("gh pr merge", workflow)
         self.assertNotIn("--admin", workflow)
 
+    def test_native_auto_merge_refuses_missing_policy_or_unreviewed_head(self):
+        import json
+        import os
+        import subprocess
+
+        checks = {"type": "required_status_checks", "parameters": {
+            "strict_required_status_checks_policy": True,
+            "required_status_checks": [
+                {"context": name, "integration_id": 15368}
+                for name in ("check", "blocklist-safety", "cururu-validated")
+            ],
+        }}
+        approval = {"type": "pull_request", "parameters": {
+            "required_approving_review_count": 1,
+            "dismiss_stale_reviews_on_push": True,
+            "allowed_merge_methods": ["merge"],
+        }}
+        script = updater.ROOT / ".github/scripts/arm-blocklist-auto-merge.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            fake_gh = Path(directory) / "gh"
+            fake_gh.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+endpoint = next(arg for arg in sys.argv[2:] if arg == "graphql" or arg.startswith("repos/"))
+if endpoint == "repos/test/repo":
+    print(os.environ["AUTO_ENABLED"])
+elif "/rules/" in endpoint:
+    print(os.environ["RULES"])
+elif endpoint.endswith("/pulls/42"):
+    repo = {"full_name": "test/repo"}
+    if ".head.sha" in sys.argv:
+        print(os.environ.get("FINAL_HEAD", os.environ["ACTUAL_HEAD"]))
+    else:
+        print(json.dumps({"node_id": "PR_1", "state": "open", "draft": False,
+            "user": {"login": "test-app[bot]"},
+            "head": {"repo": repo, "ref": "automation/update-blocklist", "sha": os.environ["ACTUAL_HEAD"]},
+            "base": {"repo": repo, "ref": "main"}}))
+elif endpoint.endswith("/files"):
+    print("assets/blocklist.txt")
+elif "/contents/" in endpoint:
+    print(os.environ["ACTUAL_BLOB"])
+elif endpoint == "graphql":
+    assert "enablePullRequestAutoMerge" in " ".join(sys.argv)
+    Path(os.environ["MUTATION_LOG"]).touch()
+else:
+    sys.exit(f"Unexpected endpoint: {endpoint}")
+""")
+            fake_gh.chmod(0o755)
+            marker = Path(directory) / "armed"
+            env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
+                       GITHUB_REPOSITORY="test/repo", APP_SLUG="test-app", PR_NUMBER="42",
+                       HEAD_SHA="reviewed", CANDIDATE_BLOB="candidate", MUTATION_LOG=str(marker))
+            for enabled, rules, actual, blob, should_arm in (
+                ("false", [approval, checks], "reviewed", "candidate", False),
+                ("true", [checks], "reviewed", "candidate", False),
+                ("true", [approval], "reviewed", "candidate", False),
+                ("true", [approval, checks], "unreviewed", "candidate", False),
+                ("true", [approval, checks], "reviewed", "different", False),
+                ("true", [approval, checks], "reviewed", "candidate", True),
+            ):
+                with self.subTest(enabled=enabled, rules=rules, head=actual, blob=blob):
+                    result = subprocess.run(
+                        ["bash", str(script)], check=False, capture_output=True, text=True,
+                        env=dict(env, AUTO_ENABLED=enabled, RULES=json.dumps([rules]),
+                                 ACTUAL_HEAD=actual, ACTUAL_BLOB=blob),
+                    )
+                    self.assertEqual(marker.exists(), should_arm, result.stderr)
+                    if should_arm:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_review_and_safety_use_separate_concurrency_groups(self):
         workflow = (updater.ROOT / ".github/workflows/cururu-review.yml").read_text()
         self.assertIn("group: cururu-review-${{", workflow)
