@@ -280,3 +280,48 @@ same 100 domains. It measures HTTP request and response bytes (including
 headers), and p50/p95 time per group of 100, including client decoding.
 It uses sequential requests with keep-alive on loopback, without TLS, a
 proxy, or HTTP compression. It does not measure production capacity.
+
+To measure batch p99 and throughput under concurrent load, build and run
+the verifier locally in one terminal:
+
+```bash
+cargo build --locked --release
+PORT=9999 RUST_LOG=off ./target/release/disposable-domain-verifier
+```
+
+In another terminal, from the repository root:
+
+```bash
+go run scripts/benchmark_verify_load.go -port 9999 -duration 2s -rounds 3
+```
+
+The load generator (Go 1.22+) uses only loopback and checks every result.
+It compares the same proxy path over HTTP/1.1 and HTTPS, using persistent
+connections and closed-loop concurrency of 1, 8, and 32. It reports errors,
+successful batches/s, and p50/p95/p99 in microseconds per batch of 100 domains.
+This does not measure WAN latency, fresh TLS handshakes, or a production
+capacity ceiling. Stop the local verifier when finished.
+
+To isolate the cost of decoding, hostname normalization, and hash lookups:
+
+```bash
+cargo bench --locked --bench verify_lookup -- batch_stages_100
+```
+
+The binary request decoder in this microbenchmark is an experiment only, not
+an API format. Both live batch routes still accept JSON requests.
+
+In one loopback campaign (Ryzen 9 7900, three one-second rounds per scenario,
+four cores for the verifier and eight separate cores for the client/proxy),
+the compact response over HTTPS processed a median of 18,562 batches/s
+with 32 concurrent requests. Its p99 ranged from 3.26 to 13.88 ms across
+rounds; the median p99 was 10.51 ms. All 350,787 measured requests across the
+matrix returned the expected results. The variance is too large to rank
+response formats or claim a capacity ceiling.
+
+In the isolated benchmark, JSON decoding took about 3.74 µs per 100 domains,
+normalization 3.62 µs, and lookup of normalized domains 0.76 µs. The candidate
+length-prefixed decoder took 0.84 µs, excluding normalization and lookup. The
+candidate request body was 1,681 bytes versus 1,894 bytes for JSON in the HTTP
+fixture. These measurements do not establish an end-to-end latency win;
+benchmark under stable load before adding a binary request format.

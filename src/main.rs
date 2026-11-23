@@ -366,7 +366,7 @@ async fn verify_compact_handler(
 }
 
 #[derive(Deserialize)]
-struct BatchVerifyRequest {
+pub(crate) struct BatchVerifyRequest {
     domains: Vec<String>,
 }
 
