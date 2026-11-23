@@ -174,13 +174,15 @@ func scenario(target *url.URL, scheme, format string, workers int, duration time
 	if format == "bits" {
 		endpoint += "/compact"
 	}
-	req, err := http.NewRequestWithContext(context.Background(), "GET", target.String()+"/health-check", nil)
+	healthCtx, cancelHealth := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelHealth()
+	req, err := http.NewRequestWithContext(healthCtx, "GET", target.String()+"/health-check", nil)
 	if err != nil {
 		return err
 	}
 	resp, err := upstream.RoundTrip(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("local verifier health check: %w", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
