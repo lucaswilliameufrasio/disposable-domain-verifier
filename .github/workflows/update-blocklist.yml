@@ -5,8 +5,13 @@ on:
     - cron: '17 */6 * * *' # Run every six hours, away from the top of the hour
   workflow_dispatch: # Allow manual trigger
 
+concurrency:
+  group: disposable-blocklist-update
+  cancel-in-progress: false
+
 jobs:
   update-blocklist:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -87,7 +92,7 @@ jobs:
             Automated update of the disposable domains blocklist.
             
             The blocklist safety checks, Rust tests, and Cururu review must pass.
-            A human must review and merge this PR under the repository rules.
+            The automation App merges only the exact blocklist-only commit that passes every check.
           branch: "automation/update-blocklist"
           base: "main"
           delete-branch: true
@@ -169,7 +174,7 @@ jobs:
           steps.pr_head.outcome == 'success' &&
           steps.create_pr.outputs.pull-request-number != ''
         id: cururu_review
-        uses: lucaswilliameufrasio/cururu@ad5b59bc6c2fdf97b66085d43a251d857aa78565 # v6.2.0
+        uses: lucaswilliameufrasio/cururu@d3cc307c2971b9af203a6c8a180e69f6a8e349fb # v6.2.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
@@ -179,6 +184,7 @@ jobs:
           cururu_fail_on: high
 
       - name: Wait for PR safety checks and CI
+        id: pr_checks
         if: >-
           success() && steps.candidate_tests.outcome == 'success' &&
           steps.cururu_review.outcome == 'success'
@@ -196,7 +202,7 @@ jobs:
             pending=0
             missing=0
             for name in blocklist-safety check; do
-              status=$(jq -r --arg n "$name" '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end' <<< "$runs")
+              status=$(jq -r --arg n "$name" '[.[] | select(.name == $n and .app.slug == "github-actions")] | max_by(.started_at) | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end' <<< "$runs")
               case "$status" in
                 completed:success) ;;
                 completed:*) echo "::error::Check '$name' finished as ${status#completed:}; refusing to merge."; exit 1 ;;
@@ -231,3 +237,21 @@ jobs:
           done
           echo "::error::Timed out waiting for blocklist-safety and CI checks."
           exit 1
+
+      - name: Merge reviewed blocklist update
+        if: >-
+          success() && github.ref == 'refs/heads/main' && github.ref_protected &&
+          steps.candidate_tests.outcome == 'success' &&
+          steps.pr_head.outcome == 'success' && steps.pr_checks.outcome == 'success' &&
+          steps.cururu_review.outcome == 'success' &&
+          steps.cururu_review.outputs.review_status == 'completed' &&
+          steps.cururu_review.outputs.quality_gate_passed == 'true' &&
+          steps.cururu_review.outputs.analysis_status == 'passed'
+        env:
+          GH_TOKEN: ${{ steps.blocklist_app.outputs.token }}
+          APP_SLUG: ${{ steps.blocklist_app.outputs.app-slug }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+          HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
+          CANDIDATE_BLOB: ${{ steps.candidate_diff.outputs.candidate_blob }}
+        run: |
+          bash .github/scripts/merge-reviewed-blocklist.sh
