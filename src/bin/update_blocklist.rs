@@ -163,7 +163,10 @@ async fn download(
     client: &reqwest::Client,
     source: &Source<'_>,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut response = client.get(source.url).send().await?.error_for_status()?;
+    let mut response = client.get(source.url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!("Source {} returned HTTP {}", source.name, response.status()).into());
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
@@ -224,10 +227,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Err("Usage: update-blocklist [--root DIRECTORY]".into());
     }
     println!("UTC: {}", chrono::Utc::now().to_rfc3339());
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?;
+    let client = source_client().timeout(Duration::from_secs(120)).build()?;
     update(&client, &root, &SOURCES).await
+}
+
+fn source_client() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
 }
 
 #[cfg(test)]
@@ -391,7 +396,11 @@ mod tests {
                 "/truncated-list",
                 get(|| async { b"mailinator.com\n".to_vec() }),
             )
-            .route("/stalled", get(std::future::pending::<StatusCode>));
+            .route("/stalled", get(std::future::pending::<StatusCode>))
+            .route(
+                "/redirect",
+                get(|| async { axum::response::Redirect::temporary("/two") }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -415,7 +424,7 @@ mod tests {
         let original = b"mailinator.com\n";
         fs::write(&target, original).unwrap();
 
-        let client = reqwest::Client::builder()
+        let client = source_client()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
@@ -423,6 +432,7 @@ mod tests {
         let first = format!("{base}/one");
         for (path, expected) in [
             ("unavailable", "503"),
+            ("redirect", "307"),
             ("protected", "Protected legitimate"),
             ("oversized", "size outside limits"),
             ("truncated-list", "size outside limits"),
@@ -445,7 +455,7 @@ mod tests {
         }
 
         let stalled = format!("{base}/stalled");
-        let timeout_client = reqwest::Client::builder()
+        let timeout_client = source_client()
             .no_proxy()
             .timeout(Duration::from_millis(200))
             .build()
