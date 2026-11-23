@@ -185,8 +185,103 @@ Sample response:
 {
   "domain": "mailinator.com",
   "is_disposable": true,
-  "reason": "Listed as disposable",
-  "source": "blocklist.txt",
+  "source": "assets/blocklist.txt",
   "checked_at": "2025-05-12T09:21:32.796957+00:00"
 }
 ```
+
+For clients that only need the result, use the optional compact endpoint:
+
+```bash
+curl 'http://localhost:9999/v1/domains/verify/compact?domain=mailinator.com'
+```
+
+A successful response is `200 OK` with `Content-Type: text/plain; charset=utf-8`
+and exactly one byte: `1` if the domain is on the disposable blocklist, or `0`
+if it is not. There is no trailing newline. The compact route uses the same
+lookup, validation and cache policy as the JSON route. Invalid requests still
+return `400` with a JSON error, not `0`. Clients should check the HTTP status
+before decoding the body.
+
+### Verify domains in a batch
+
+Send 1–100 hostnames in a JSON body (maximum 32 KiB). Both routes preserve
+input order and duplicates. Send only domains, not full email addresses.
+
+```bash
+curl -fsS 'http://localhost:9999/v1/domains/verify/batch' \
+  -H 'Content-Type: application/json' \
+  --data '{"domains":["mailinator.com","example.com"]}'
+# {"results":[true,false]}
+
+curl -fsS 'http://localhost:9999/v1/domains/verify/batch/compact' \
+  -H 'Content-Type: application/json' \
+  --data '{"domains":["mailinator.com","example.com"]}' | od -An -tx1
+# 01
+```
+
+On success, the compact batch returns `application/octet-stream`, with
+`ceil(n / 8)` bytes for `n` domains. Result `i` (zero-based) uses bit `i % 8`
+in byte `i / 8` (integer division), least-significant bit first. A set bit
+means that the domain is on the blocklist; unused bits are zero. For both
+formats, an invalid hostname rejects the whole batch with `400` and the
+invalid index in the JSON error message; there are no partial results.
+Malformed JSON returns `400`; a body that does not match the JSON schema
+returns `422`; excessive body size returns `413`; a non-JSON content type
+returns `415`. Batch responses use `Cache-Control: no-store`.
+
+An unlisted domain is not proof that a mailbox is permanent or deliverable.
+For signup integration and read-only account audits, see the
+[integration skill](.agents/skills/disposable-domain-integration/SKILL.md).
+
+### Install the integration skill
+
+**In this repository:** open the checkout in OpenCode. It automatically
+discovers the skill under `.agents/skills/`; no install command is needed.
+Use `@disposable-domain-integration` in your prompt.
+
+**In another repository:** from the root of the verifier checkout, copy the
+skill into your app's OpenCode project skills directory. Replace `/path/to/your-app`
+with the actual path:
+
+```bash
+app=/path/to/your-app
+dest="$app/.opencode/skills/disposable-domain-integration"
+test -d "$app" &&
+  mkdir -p "$app/.opencode/skills" &&
+  mkdir "$dest" &&
+  cp .agents/skills/disposable-domain-integration/SKILL.md "$dest/SKILL.md"
+```
+
+If the destination already exists, the command stops without overwriting it.
+For a global install instead, run this from the verifier checkout:
+
+```bash
+dest="$HOME/.config/opencode/skills/disposable-domain-integration"
+mkdir -p "$(dirname "$dest")" &&
+  mkdir "$dest" &&
+  cp .agents/skills/disposable-domain-integration/SKILL.md "$dest/SKILL.md"
+```
+
+Open the app repository in OpenCode and try:
+
+```text
+@disposable-domain-integration Plan a read-only audit of our signup accounts for disposable email domains.
+```
+
+The skill is guidance only: installing it neither starts the verifier nor
+accesses your database. The batch routes require a server build that includes
+them.
+
+### Reproduce the HTTP benchmark
+
+```bash
+cargo build --locked --release
+python3 scripts/benchmark_verify_batch.py
+```
+
+The script starts a local service and compares four ways to look up the
+same 100 domains. It measures HTTP request and response bytes (including
+headers), and p50/p95 time per group of 100, including client decoding.
+It uses sequential requests with keep-alive on loopback, without TLS, a
+proxy, or HTTP compression. It does not measure production capacity.
