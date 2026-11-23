@@ -1,0 +1,124 @@
+name: Attested blocklist updater release trial
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: updater-release-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  UPDATER_ASSET: update-blocklist-linux-x86_64
+  UPDATER_TAG: updater-trial-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
+        with:
+          toolchain: 1.100.0
+      - name: Test and build exact source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo test --locked --features blocklist-updater --bin update-blocklist
+          cargo build --locked --release --features blocklist-updater --bin update-blocklist
+          cp target/release/update-blocklist "$RUNNER_TEMP/$UPDATER_ASSET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: updater-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ env.UPDATER_ASSET }}
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          digest-mismatch: error
+          path: ${{ runner.temp }}/release
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/${{ env.UPDATER_ASSET }}
+      - name: Publish a non-latest prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$UPDATER_TAG" "$RUNNER_TEMP/release/$UPDATER_ASSET" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Blocklist updater trial $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" \
+            --notes "Experimental updater; not used by the scheduled workflow. Source: $GITHUB_SHA."
+
+  consume:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        updater: [python, release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: false
+      - name: Generate candidate without publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATER: ${{ matrix.updater }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$UPDATER" == release ]]; then
+            directory=$(mktemp -d)
+            trap 'rm -f "$directory/$UPDATER_ASSET"; rmdir "$directory"' EXIT
+            gh release download "$UPDATER_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$UPDATER_ASSET" --dir "$directory"
+            binary="$directory/$UPDATER_ASSET"
+            gh attestation verify "$binary" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/updater-release.yml" \
+              --signer-digest "$GITHUB_SHA" --source-digest "$GITHUB_SHA" \
+              --source-ref refs/heads/main --deny-self-hosted-runners
+            chmod +x "$binary"
+            env -u GH_TOKEN "$binary" --root "$GITHUB_WORKSPACE"
+          else
+            python3 -m unittest discover -s scripts -p 'test_*.py' -v
+            ./scripts/update_blocklist.sh
+          fi
+          sha256sum assets/blocklist.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Run scheduled job candidate tests
+        run: |
+          cargo test --locked
+          cargo test --locked blocklist_validator_
