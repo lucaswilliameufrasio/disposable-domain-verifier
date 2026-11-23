@@ -62,6 +62,49 @@ using `--root`. It generated 13,578 entries (136 added, 38 removed) without
 touching the working tree. This tests portability of the binary on the same
 host, not release provenance or compatibility with the GitHub runner.
 
+`.github/workflows/updater-release.yml` is the manual release rehearsal, not
+the scheduled updater. GitHub requires the workflow on the default branch
+before it can be dispatched. Once reviewed and on protected `main`, it builds
+and tests that exact revision without write credentials, attests the binary
+in a separate publishing job, and creates a non-latest prerelease. Two
+unprivileged jobs then run the Python and verified release candidates with the
+same application validation. Use job timestamps, compare generated hashes and
+the source hashes printed by each candidate, and discard comparisons where
+upstream changed between jobs. These jobs exclude PR creation, Cururu, and
+waiting for PR checks, so report those separately from the scheduled baseline.
+No production workflow consumes a trial release.
+
+For production, pin a specific release tag and source SHA in the trusted
+workflow, enforce the signer workflow and source ref/digest, and verify
+compatibility against updater source changes before execution. Do not use
+`latest` or move a release tag. A successful trial is not authorization for
+cutover.
+
+## Native auto-merge without bypass
+
+GitHub's native auto-merge is disabled for this repository. The `main`
+ruleset requires one approval and allows merge commits; it does not currently
+require status checks. The proposed rollout is:
+
+1. Require `check`, `blocklist-safety` and a dedicated successful Cururu
+   verdict for the exact reviewed head as GitHub status checks, restricted to
+   their expected publisher. The generic `review` job can be skipped and must
+   not be used as a substitute for the dedicated verdict.
+2. Keep one eligible approval and ensure approvals cannot carry forward to
+   unreviewed pushes. Require the head to be current with `main`. Enable
+   **Allow auto-merge** without adding a bypass actor.
+3. Arm auto-merge using the GitHub App only for its own blocklist-only PR
+   after checking the author, branch, path, candidate blob, and current SHA.
+   Use the normal merge method. When the app updates the head, revalidate it;
+   the status checks and approval must apply to the new head.
+4. Verify with a test PR that missing approval or a pending/failed check
+   blocks integration, and that granting approval with all checks green
+   allows GitHub to merge. Keep the existing manual review flow until tested.
+
+The setting and ruleset updates are administrative changes, separate from
+this draft and from any one-time administrative merge. Native auto-merge
+automates integration *after* approval; it does not approve an unattended PR.
+
 ## Before replacing the existing scripts
 
 - Complete differential and integration coverage for all success, failure,
