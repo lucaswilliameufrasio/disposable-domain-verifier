@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The merge API only pins the head. Require GitHub to enforce up-to-date
+# checks in a separate ruleset that the App cannot bypass.
+rules=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rules/branches/main")
+strict_rulesets=$(jq -er '
+  add | map(select(.type == "required_status_checks"
+    and .parameters.strict_required_status_checks_policy == true
+    and ([.parameters.required_status_checks[]
+          | select(.integration_id == 15368) | .context]
+          | contains(["check", "blocklist-safety"]))))
+  | map(.ruleset_id | select(type == "number")) | unique | .[]
+' <<< "$rules") || {
+  echo "::error::Missing a strict CI and safety ruleset; refusing automatic merge."
+  exit 1
+}
+enforced=false
+while IFS= read -r ruleset_id; do
+  bypass=$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id?includes_parents=true" \
+    --jq .current_user_can_bypass)
+  if [[ "$bypass" == never ]]; then
+    enforced=true
+    break
+  fi
+done <<< "$strict_rulesets"
+if [[ "$enforced" != true ]]; then
+  echo "::error::The App can bypass the strict checks or GitHub did not confirm otherwise."
+  exit 1
+fi
+
 # Only called after the current run validated the candidate and both PR checks.
 # Revalidate identity and content before using the App's PR-only exception.
 pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")

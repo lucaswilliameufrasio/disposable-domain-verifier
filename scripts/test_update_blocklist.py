@@ -188,7 +188,18 @@ class UpdateBlocklistTests(unittest.TestCase):
 import json, os, sys
 from pathlib import Path
 endpoint = next(arg for arg in sys.argv[2:] if arg.startswith("repos/"))
-if endpoint.endswith("/pulls/42"):
+if endpoint.endswith("/rules/branches/main"):
+    print(os.environ.get("STRICT_RULES", json.dumps([[{
+        "type": "required_status_checks", "ruleset_id": 123,
+        "parameters": {"strict_required_status_checks_policy": True,
+            "required_status_checks": [
+                {"context": name, "integration_id": 15368}
+                for name in ("check", "blocklist-safety")
+            ]},
+    }]])))
+elif "/rulesets/123?" in endpoint:
+    print(os.environ.get("STRICT_BYPASS", "never"))
+elif endpoint.endswith("/pulls/42"):
     repo = {"full_name": "test/repo"}
     print(json.dumps({"state": "open", "draft": False,
         "user": {"login": os.environ.get("ACTUAL_AUTHOR", "test-app[bot]")},
@@ -219,6 +230,9 @@ else:
                        GITHUB_SHA="trusted-base", HEAD_SHA="reviewed", CANDIDATE_BLOB="candidate",
                        MUTATION_LOG=str(marker))
             for overrides, should_request, should_succeed in (
+                ({"STRICT_RULES": "[[]]"}, False, False),
+                ({"STRICT_BYPASS": "pull_requests_only"}, False, False),
+                ({"STRICT_BYPASS": ""}, False, False),
                 ({"ACTUAL_AUTHOR": "other-user"}, False, False),
                 ({"ACTUAL_HEAD": "unreviewed"}, False, False),
                 ({"ACTUAL_FILES": "assets/blocklist.txt\n.github/workflows/ci.yml"}, False, False),
