@@ -205,7 +205,8 @@ elif endpoint.endswith("/pulls/42"):
         "user": {"login": os.environ.get("ACTUAL_AUTHOR", "test-app[bot]")},
         "head": {"repo": repo, "ref": "automation/update-blocklist",
                  "sha": os.environ.get("ACTUAL_HEAD", "reviewed")},
-        "base": {"repo": repo, "ref": "main", "sha": "trusted-base"}}))
+        "base": {"repo": repo, "ref": "main",
+                 "sha": os.environ.get("PR_BASE", "trusted-base")}}))
 elif endpoint.endswith("/files"):
     print(os.environ.get("ACTUAL_FILES", "assets/blocklist.txt"))
 elif "/contents/" in endpoint:
@@ -238,6 +239,7 @@ else:
                 ({"ACTUAL_FILES": "assets/blocklist.txt\n.github/workflows/ci.yml"}, False, False),
                 ({"ACTUAL_BLOB": "different"}, False, False),
                 ({"PARENTS": "trusted-base\nextra-parent"}, False, False),
+                ({"PR_BASE": "different-pr-base"}, False, False),
                 ({"ACTUAL_BASE": "new-base"}, False, False),
                 ({"MERGE_RESPONSE": '{"merged":false}'}, True, False),
                 ({"MERGE_PARENTS": "new-base\nreviewed"}, True, False),
