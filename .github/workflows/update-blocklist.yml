@@ -265,6 +265,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.blocklist_app.outputs.token }}
           APP_SLUG: ${{ steps.blocklist_app.outputs.app-slug }}
+          APP_ID: ${{ vars.BLOCKLIST_APP_ID }}
           PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
           HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
           CANDIDATE_BLOB: ${{ steps.candidate_diff.outputs.candidate_blob }}

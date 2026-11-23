@@ -172,14 +172,14 @@ class UpdateBlocklistTests(unittest.TestCase):
         import os
         import subprocess
 
-        checks = {"type": "required_status_checks", "parameters": {
+        checks = {"type": "required_status_checks", "ruleset_id": 20, "parameters": {
             "strict_required_status_checks_policy": True,
             "required_status_checks": [
                 {"context": name, "integration_id": 15368}
                 for name in ("check", "blocklist-safety", "cururu-validated")
             ],
         }}
-        approval = {"type": "pull_request", "parameters": {
+        approval = {"type": "pull_request", "ruleset_id": 10, "parameters": {
             "required_approving_review_count": 1,
             "dismiss_stale_reviews_on_push": True,
             "allowed_merge_methods": ["merge"],
@@ -195,6 +195,9 @@ if endpoint == "repos/test/repo":
     print(os.environ["AUTO_ENABLED"])
 elif "/rules/" in endpoint:
     print(os.environ["RULES"])
+elif "/rulesets/" in endpoint:
+    rule_id = endpoint.split("/rulesets/")[1].split("?")[0]
+    print(json.dumps(json.loads(os.environ["RULESET_DETAILS"])[rule_id]))
 elif endpoint.endswith("/pulls/42"):
     repo = {"full_name": "test/repo"}
     if ".head.sha" in sys.argv:
@@ -217,20 +220,29 @@ else:
             fake_gh.chmod(0o755)
             marker = Path(directory) / "armed"
             env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
-                       GITHUB_REPOSITORY="test/repo", APP_SLUG="test-app", PR_NUMBER="42",
+                       GITHUB_REPOSITORY="test/repo", APP_SLUG="test-app", APP_ID="123", PR_NUMBER="42",
                        HEAD_SHA="reviewed", CANDIDATE_BLOB="candidate", MUTATION_LOG=str(marker))
-            for enabled, rules, actual, blob, should_arm in (
-                ("false", [approval, checks], "reviewed", "candidate", False),
-                ("true", [checks], "reviewed", "candidate", False),
-                ("true", [approval], "reviewed", "candidate", False),
-                ("true", [approval, checks], "unreviewed", "candidate", False),
-                ("true", [approval, checks], "reviewed", "different", False),
-                ("true", [approval, checks], "reviewed", "candidate", True),
+            visible = {"current_user_can_bypass": "never"}
+            bypass = {"current_user_can_bypass": "never", "bypass_actors": [
+                {"actor_type": "Integration", "actor_id": 123, "bypass_mode": "pull_request"},
+            ]}
+            for enabled, rules, actual, blob, details, should_arm in (
+                ("false", [approval, checks], "reviewed", "candidate", visible, False),
+                ("true", [checks], "reviewed", "candidate", visible, False),
+                ("true", [approval], "reviewed", "candidate", visible, False),
+                ("true", [approval, checks], "reviewed", "candidate", bypass, False),
+                ("true", [approval, checks], "reviewed", "candidate",
+                 {"current_user_can_bypass": "pull_requests_only"}, False),
+                ("true", [approval, checks], "reviewed", "candidate", {}, False),
+                ("true", [approval, checks], "unreviewed", "candidate", visible, False),
+                ("true", [approval, checks], "reviewed", "different", visible, False),
+                ("true", [approval, checks], "reviewed", "candidate", visible, True),
             ):
-                with self.subTest(enabled=enabled, rules=rules, head=actual, blob=blob):
+                with self.subTest(enabled=enabled, rules=rules, head=actual, blob=blob, details=details):
                     result = subprocess.run(
                         ["bash", str(script)], check=False, capture_output=True, text=True,
                         env=dict(env, AUTO_ENABLED=enabled, RULES=json.dumps([rules]),
+                                 RULESET_DETAILS=json.dumps({"10": visible, "20": details}),
                                  ACTUAL_HEAD=actual, ACTUAL_BLOB=blob),
                     )
                     self.assertEqual(marker.exists(), should_arm, result.stderr)

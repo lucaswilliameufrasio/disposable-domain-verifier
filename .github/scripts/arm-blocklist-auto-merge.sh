@@ -44,6 +44,32 @@ if ! jq -e '
   exit 0
 fi
 
+if ! [[ "${APP_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "::error::Cannot verify bypass without the configured GitHub App ID."
+  exit 1
+fi
+
+rulesets=$(jq -er '
+  add | if length > 0 and all(.[]; (.ruleset_id | type) == "number")
+        then map(.ruleset_id) | unique | .[]
+        else error("Missing active ruleset IDs") end
+' <<< "$rules")
+while IFS= read -r ruleset_id; do
+  # This is the App's token: ask GitHub whether this exact caller can bypass.
+  # The full bypass list can be hidden from callers without ruleset write access.
+  ruleset=$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id?includes_parents=true")
+  if ! jq -e --argjson app_id "$APP_ID" '
+    .current_user_can_bypass == "never"
+      and (if has("bypass_actors") then
+        (.bypass_actors | type) == "array"
+        and all(.bypass_actors[]; .actor_type != "Integration" or .actor_id != $app_id)
+      else true end)
+  ' <<< "$ruleset" >/dev/null; then
+    echo "::error::Ruleset $ruleset_id grants App bypass or its bypass policy cannot be verified."
+    exit 1
+  fi
+done <<< "$rulesets"
+
 pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
 node=$(jq -er --arg repo "$GITHUB_REPOSITORY" --arg author "${APP_SLUG}[bot]" --arg sha "$HEAD_SHA" '
   select(.state == "open" and .draft == false and .user.login == $author
