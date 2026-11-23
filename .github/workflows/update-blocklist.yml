@@ -5,6 +5,10 @@ on:
     - cron: '17 */6 * * *' # Run every six hours, away from the top of the hour
   workflow_dispatch: # Allow manual trigger
 
+concurrency:
+  group: disposable-blocklist-update
+  cancel-in-progress: false
+
 jobs:
   update-blocklist:
     runs-on: ubuntu-latest
@@ -13,6 +17,7 @@ jobs:
       pull-requests: write
       issues: write
       checks: read
+      statuses: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,6 +76,14 @@ jobs:
           permission-pull-requests: write
           permission-issues: write
 
+      - name: Disarm any pending merge before refreshing the automation branch
+        if: steps.candidate_diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.blocklist_app.outputs.token }}
+          APP_SLUG: ${{ steps.blocklist_app.outputs.app-slug }}
+        run: |
+          bash .github/scripts/arm-blocklist-auto-merge.sh --disarm
+
       - name: Create Pull Request
         if: steps.candidate_diff.outputs.changed == 'true'
         id: create_pr
@@ -87,7 +100,7 @@ jobs:
             Automated update of the disposable domains blocklist.
             
             The blocklist safety checks, Rust tests, and Cururu review must pass.
-            A human must review and merge this PR under the repository rules.
+            Human approval is required. GitHub may merge after approval if native auto-merge is enabled.
           branch: "automation/update-blocklist"
           base: "main"
           delete-branch: true
@@ -169,7 +182,7 @@ jobs:
           steps.pr_head.outcome == 'success' &&
           steps.create_pr.outputs.pull-request-number != ''
         id: cururu_review
-        uses: lucaswilliameufrasio/cururu@ad5b59bc6c2fdf97b66085d43a251d857aa78565 # v6.2.0
+        uses: lucaswilliameufrasio/cururu@d3cc307c2971b9af203a6c8a180e69f6a8e349fb # v6.2.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           llm_api_key: ${{ secrets.LLM_API_KEY }}
@@ -196,7 +209,7 @@ jobs:
             pending=0
             missing=0
             for name in blocklist-safety check; do
-              status=$(jq -r --arg n "$name" '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end' <<< "$runs")
+              status=$(jq -r --arg n "$name" '[.[] | select(.name == $n and .app.slug == "github-actions")] | max_by(.started_at) | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end' <<< "$runs")
               case "$status" in
                 completed:success) ;;
                 completed:*) echo "::error::Check '$name' finished as ${status#completed:}; refusing to merge."; exit 1 ;;
@@ -231,3 +244,30 @@ jobs:
           done
           echo "::error::Timed out waiting for blocklist-safety and CI checks."
           exit 1
+
+      - name: Record reviewed blocklist commit
+        if: >-
+          success() && steps.cururu_review.outputs.review_status == 'completed' &&
+          steps.cururu_review.outputs.quality_gate_passed == 'true' &&
+          steps.cururu_review.outputs.analysis_status == 'passed'
+        id: reviewed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=success -f context=cururu-validated \
+            -f description='Cururu passed on the validated blocklist commit' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
+
+      - name: Arm GitHub native auto-merge
+        if: vars.BLOCKLIST_NATIVE_AUTO_MERGE == 'true' && steps.reviewed.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.blocklist_app.outputs.token }}
+          APP_SLUG: ${{ steps.blocklist_app.outputs.app-slug }}
+          APP_ID: ${{ vars.BLOCKLIST_APP_ID }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+          HEAD_SHA: ${{ steps.pr_head.outputs.head_sha }}
+          CANDIDATE_BLOB: ${{ steps.candidate_diff.outputs.candidate_blob }}
+        run: |
+          bash .github/scripts/arm-blocklist-auto-merge.sh
