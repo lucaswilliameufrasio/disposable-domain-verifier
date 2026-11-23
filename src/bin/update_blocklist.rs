@@ -368,7 +368,8 @@ mod tests {
             .route(
                 "/truncated-list",
                 get(|| async { b"mailinator.com\n".to_vec() }),
-            );
+            )
+            .route("/stalled", get(std::future::pending::<StatusCode>));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -420,6 +421,33 @@ mod tests {
             assert_eq!(fs::read(&target).unwrap(), original, "{path}");
             assert_eq!(fs::read_dir(&assets).unwrap().count(), 4, "{path}");
         }
+
+        let stalled = format!("{base}/stalled");
+        let timeout_client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let stalled_inputs = [
+            Source {
+                url: &first,
+                ..source()
+            },
+            Source {
+                url: &stalled,
+                ..source()
+            },
+        ];
+        let error = update(&timeout_client, temp.path(), &stalled_inputs)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert_eq!(fs::read_dir(&assets).unwrap().count(), 4);
 
         let second = format!("{base}/two");
         let inputs = [
