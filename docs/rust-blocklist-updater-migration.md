@@ -55,6 +55,13 @@ older or unverified binary. The current scheduled workflow also runs Rust
 tests of the application; a prebuilt updater does not remove that separate
 compilation. Measure the complete job, not only updater startup.
 
+A local packaging rehearsal built the updater with `--locked`, packed the
+Linux executable and a SHA-256 manifest into a roughly 2 MiB archive,
+verified the extracted binary, then ran it against an isolated checkout copy
+using `--root`. It generated 13,578 entries (136 added, 38 removed) without
+touching the working tree. This tests portability of the binary on the same
+host, not release provenance or compatibility with the GitHub runner.
+
 ## Before replacing the existing scripts
 
 - Complete differential and integration coverage for all success, failure,
