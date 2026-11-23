@@ -60,7 +60,12 @@ compilation. Measure the complete job, not only updater startup.
 - Complete differential and integration coverage for all success, failure,
   timeout, malformed input, size, protected-domain, exclusion, atomic write,
   and source failure paths. The existing Python tests remain authoritative.
-- Check command behavior and portability from different working directories.
+- The Rust HTTP integration test now verifies that a failed download, an
+  oversized or undersized source, and an excluded-but-protected domain never
+  replace the existing file. It also checks successful publication with both
+  sources. Timeout and remaining parity cases still need coverage.
+- The prebuilt executable accepts `--root DIRECTORY` (default: current
+  directory) so it does not depend on the checkout where it was compiled.
 - Measure end-to-end GitHub Actions duration for cold and warm caches, with
   equivalent validation, including compilation. Optimize or change the
   packaging strategy if it increases total workflow time.

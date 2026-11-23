@@ -17,14 +17,14 @@ const PROTECTED: [&str; 6] = [
 ];
 const KNOWN: [&str; 3] = ["mailinator.com", "10minutemail.com", "guerrillamail.com"];
 
-struct Source {
+struct Source<'a> {
     name: &'static str,
-    url: &'static str,
+    url: &'a str,
     min: usize,
     max: usize,
 }
 
-const SOURCES: [Source; 2] = [
+const SOURCES: [Source<'static>; 2] = [
     Source {
         name: "community",
         url: "https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf",
@@ -75,7 +75,7 @@ fn digest(data: &[u8]) -> String {
 }
 
 fn build(
-    sources: &[(&Source, &[u8])],
+    sources: &[(&Source<'_>, &[u8])],
     old: &[u8],
     own: &[u8],
     protected: &[u8],
@@ -159,7 +159,10 @@ fn build(
     Ok(result)
 }
 
-async fn download(client: &reqwest::Client, source: &Source) -> Result<Vec<u8>, Box<dyn Error>> {
+async fn download(
+    client: &reqwest::Client,
+    source: &Source<'_>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut response = client.get(source.url).send().await?.error_for_status()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
@@ -188,31 +191,17 @@ fn publish(target: &Path, data: &[u8]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let mut args = std::env::args_os().skip(1);
-    let root = match args.next() {
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf(),
-        Some(flag) if flag == "--root" => args.next().ok_or("--root requires a directory")?.into(),
-        Some(_) => return Err("Usage: update-blocklist [--root DIRECTORY]".into()),
-    };
-    if args.next().is_some() {
-        return Err("Usage: update-blocklist [--root DIRECTORY]".into());
-    }
-    println!("UTC: {}", chrono::Utc::now().to_rfc3339());
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?;
-    let (first, second) = tokio::join!(
-        download(&client, &SOURCES[0]),
-        download(&client, &SOURCES[1])
-    );
-    let first = first?;
-    let second = second?;
+async fn update(
+    client: &reqwest::Client,
+    root: &Path,
+    sources: &[Source<'_>; 2],
+) -> Result<(), Box<dyn Error>> {
+    let (first, second) =
+        tokio::try_join!(download(client, &sources[0]), download(client, &sources[1]))?;
     let root = root.join("assets");
     let target = root.join("blocklist.txt");
     let result = build(
-        &[(&SOURCES[0], &first), (&SOURCES[1], &second)],
+        &[(&sources[0], &first), (&sources[1], &second)],
         &fs::read(&target)?,
         &fs::read(root.join("confirmed-disposable-domains.txt"))?,
         &fs::read(root.join("legitimate-domains.txt"))?,
@@ -223,6 +212,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args_os().skip(1);
+    let root = match args.next() {
+        None => std::env::current_dir()?,
+        Some(flag) if flag == "--root" => args.next().ok_or("--root requires a directory")?.into(),
+        Some(_) => return Err("Usage: update-blocklist [--root DIRECTORY]".into()),
+    };
+    if args.next().is_some() {
+        return Err("Usage: update-blocklist [--root DIRECTORY]".into());
+    }
+    println!("UTC: {}", chrono::Utc::now().to_rfc3339());
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    update(&client, &root, &SOURCES).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,7 +238,7 @@ mod tests {
         format!("{}\n", PROTECTED.join("\n")).into_bytes()
     }
 
-    fn source() -> Source {
+    fn source() -> Source<'static> {
         Source {
             name: "test",
             url: "https://example.test/",
@@ -338,27 +345,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_failures_fail_closed() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url: &'static str =
-            Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 1024];
-            stream.read(&mut request).unwrap();
-            stream
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
+    async fn update_publishes_only_after_both_http_sources_pass() {
+        use axum::{Router, http::StatusCode, routing::get};
+        let app = Router::new()
+            .route(
+                "/one",
+                get(|| async { payload("Mailinator.com\nshared.example") }),
+            )
+            .route(
+                "/two",
+                get(|| async { payload("mailinator.com\nother.example") }),
+            )
+            .route(
+                "/unavailable",
+                get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route(
+                "/protected",
+                get(|| async { payload("mailinator.com\ngmail.com") }),
+            )
+            .route("/oversized", get(|| async { vec![b'x'; MAX_BYTES + 1] }))
+            .route(
+                "/truncated-list",
+                get(|| async { b"mailinator.com\n".to_vec() }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
         });
-        let source = Source {
-            name: "failure",
-            url,
-            min: 1,
-            max: 2,
-        };
-        assert!(download(&reqwest::Client::new(), &source).await.is_err());
-        server.join().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path().join("assets");
+        fs::create_dir(&assets).unwrap();
+        fs::write(
+            assets.join("confirmed-disposable-domains.txt"),
+            b"local.example\n",
+        )
+        .unwrap();
+        fs::write(
+            assets.join("blocklist-exclusions.txt"),
+            b"other.example\ngmail.com\n",
+        )
+        .unwrap();
+        fs::write(assets.join("legitimate-domains.txt"), protected()).unwrap();
+        let target = assets.join("blocklist.txt");
+        let original = b"mailinator.com\n";
+        fs::write(&target, original).unwrap();
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let first = format!("{base}/one");
+        for (path, expected) in [
+            ("unavailable", "503"),
+            ("protected", "Protected legitimate"),
+            ("oversized", "size outside limits"),
+            ("truncated-list", "size outside limits"),
+        ] {
+            let second = format!("{base}/{path}");
+            let inputs = [
+                Source {
+                    url: &first,
+                    ..source()
+                },
+                Source {
+                    url: &second,
+                    ..source()
+                },
+            ];
+            let error = update(&client, temp.path(), &inputs).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{path}: {error}");
+            assert_eq!(fs::read(&target).unwrap(), original, "{path}");
+            assert_eq!(fs::read_dir(&assets).unwrap().count(), 4, "{path}");
+        }
+
+        let second = format!("{base}/two");
+        let inputs = [
+            Source {
+                url: &first,
+                ..source()
+            },
+            Source {
+                url: &second,
+                ..source()
+            },
+        ];
+        update(&client, temp.path(), &inputs).await.unwrap();
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"local.example\nmailinator.com\nshared.example\n"
+        );
+        assert_eq!(fs::read_dir(&assets).unwrap().count(), 4);
+        server.abort();
     }
 
     #[test]
