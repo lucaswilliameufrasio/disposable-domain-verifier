@@ -236,37 +236,32 @@ For signup integration and read-only account audits, see the
 
 ### Install the integration skill
 
-**In this repository:** open the checkout in OpenCode. It automatically
-discovers the skill under `.agents/skills/`; no install command is needed.
-Use `@disposable-domain-integration` in your prompt.
-
-**In another repository:** from the root of the verifier checkout, copy the
-skill into your app's OpenCode project skills directory. Replace `/path/to/your-app`
-with the actual path:
+Use the [`skills` CLI](https://github.com/vercel-labs/skills) with Node.js
+22.20 or later. Run this from the project where you want to use the skill:
 
 ```bash
-app=/path/to/your-app
-dest="$app/.opencode/skills/disposable-domain-integration"
-test -d "$app" &&
-  mkdir -p "$app/.opencode/skills" &&
-  mkdir "$dest" &&
-  cp .agents/skills/disposable-domain-integration/SKILL.md "$dest/SKILL.md"
+npx skills add lucaswilliameufrasio/disposable-domain-verifier@4837360354418e0f33d17a9c83b36b57f5894455 \
+  --skill disposable-domain-integration
 ```
 
-If the destination already exists, the command stops without overwriting it.
-For a global install instead, run this from the verifier checkout:
+The commit pin selects the version that contains the skill even before it
+reaches `main`. Choose your agents when prompted, or explicitly select them:
 
 ```bash
-dest="$HOME/.config/opencode/skills/disposable-domain-integration"
-mkdir -p "$(dirname "$dest")" &&
-  mkdir "$dest" &&
-  cp .agents/skills/disposable-domain-integration/SKILL.md "$dest/SKILL.md"
+npx skills add lucaswilliameufrasio/disposable-domain-verifier@4837360354418e0f33d17a9c83b36b57f5894455 \
+  --skill disposable-domain-integration --agent claude-code codex cursor opencode
 ```
 
-Open the app repository in OpenCode and try:
+Add `--global` to install for your user instead of only the current project.
+Run `npx skills list` (or `npx skills list --global`) and look for
+`disposable-domain-integration`. Agents that discover `.agents/skills/`
+directly can also use the skill from this repository's checkout without an
+install step.
+
+Then ask your agent:
 
 ```text
-@disposable-domain-integration Plan a read-only audit of our signup accounts for disposable email domains.
+Use disposable-domain-integration to plan a read-only audit of our signup accounts for disposable email domains.
 ```
 
 The skill is guidance only: installing it neither starts the verifier nor
