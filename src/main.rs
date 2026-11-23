@@ -6,10 +6,13 @@ static GLOBAL: MiMalloc = MiMalloc;
 use arc_swap::ArcSwap;
 use axum::{
     Json, Router,
-    extract::{Query, State},
-    http::{StatusCode, Uri, header::CACHE_CONTROL},
+    extract::{DefaultBodyLimit, Query, State, rejection::JsonRejection},
+    http::{
+        StatusCode, Uri,
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -28,6 +31,9 @@ type DomainSet = HashSet<String, ahash::RandomState>;
 // serve verification results for several hours and refresh them in background.
 const VERIFY_CACHE_CONTROL: &str =
     "public, max-age=300, s-maxage=21600, stale-while-revalidate=604800";
+const MAX_BATCH_DOMAINS: usize = 100;
+const MAX_BATCH_BODY_BYTES: usize = 32 * 1024;
+const BATCH_CACHE_CONTROL: &str = "no-store";
 
 // --- Error Handling Standard ---
 
@@ -173,6 +179,15 @@ struct AppState {
 fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/v1/domains/verify", get(verify_handler))
+        .route("/v1/domains/verify/compact", get(verify_compact_handler))
+        .route(
+            "/v1/domains/verify/batch",
+            post(verify_batch_handler).layer(DefaultBodyLimit::max(MAX_BATCH_BODY_BYTES)),
+        )
+        .route(
+            "/v1/domains/verify/batch/compact",
+            post(verify_batch_compact_handler).layer(DefaultBodyLimit::max(MAX_BATCH_BODY_BYTES)),
+        )
         .route("/health-check", get(health_check))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
@@ -296,10 +311,10 @@ struct VerifyResponse {
     checked_at: String,
 }
 
-async fn verify_handler(
-    State(state): State<AppState>,
+fn verify_domain(
+    state: &AppState,
     params: Result<Query<VerifyParams>, axum::extract::rejection::QueryRejection>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<(String, bool), AppError> {
     let Query(params) = params.map_err(|e| {
         AppError::BadRequest(
             format!("Invalid query parameters: {}", e),
@@ -319,7 +334,14 @@ async fn verify_handler(
     // Use ArcSwap load to get a handle to the current set
     let domains = state.domains.load();
     let is_disposable = domains.contains(search_domain.as_ref());
+    Ok((domain, is_disposable))
+}
 
+async fn verify_handler(
+    State(state): State<AppState>,
+    params: Result<Query<VerifyParams>, axum::extract::rejection::QueryRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let (domain, is_disposable) = verify_domain(&state, params)?;
     let now = Utc::now().to_rfc3339();
 
     Ok((
@@ -332,6 +354,99 @@ async fn verify_handler(
             checked_at: now,
         }),
     ))
+}
+
+async fn verify_compact_handler(
+    State(state): State<AppState>,
+    params: Result<Query<VerifyParams>, axum::extract::rejection::QueryRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let (_, is_disposable) = verify_domain(&state, params)?;
+    let result = if is_disposable { "1" } else { "0" };
+    Ok(([(CACHE_CONTROL, VERIFY_CACHE_CONTROL)], result))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BatchVerifyRequest {
+    domains: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BatchVerifyResponse {
+    results: Vec<bool>,
+}
+
+fn verify_batch(
+    state: &AppState,
+    payload: Result<Json<BatchVerifyRequest>, JsonRejection>,
+) -> Result<Vec<bool>, (StatusCode, Json<ApiError>)> {
+    let Json(payload) = payload.map_err(|error| {
+        (
+            error.status(),
+            Json(ApiError {
+                message: "Expected a JSON object with a domains array within the body limit".into(),
+                error_code: "INVALID_BATCH_BODY".into(),
+                extra: None,
+            }),
+        )
+    })?;
+
+    if !(1..=MAX_BATCH_DOMAINS).contains(&payload.domains.len()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                message: format!("The domains array must contain 1 to {MAX_BATCH_DOMAINS} entries"),
+                error_code: "INVALID_BATCH_SIZE".into(),
+                extra: None,
+            }),
+        ));
+    }
+
+    let domains = state.domains.load();
+    let mut results = Vec::with_capacity(payload.domains.len());
+    for (index, domain) in payload.domains.iter().enumerate() {
+        let normalized = normalize_valid_domain(domain).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    message: format!("Domain at index {index} must be a valid hostname"),
+                    error_code: "INVALID_DOMAIN".into(),
+                    extra: None,
+                }),
+            )
+        })?;
+        results.push(domains.contains(normalized.as_ref()));
+    }
+    Ok(results)
+}
+
+async fn verify_batch_handler(
+    State(state): State<AppState>,
+    payload: Result<Json<BatchVerifyRequest>, JsonRejection>,
+) -> Response {
+    let response = match verify_batch(&state, payload) {
+        Ok(results) => Json(BatchVerifyResponse { results }).into_response(),
+        Err(error) => error.into_response(),
+    };
+    ([(CACHE_CONTROL, BATCH_CACHE_CONTROL)], response).into_response()
+}
+
+async fn verify_batch_compact_handler(
+    State(state): State<AppState>,
+    payload: Result<Json<BatchVerifyRequest>, JsonRejection>,
+) -> Response {
+    let response = match verify_batch(&state, payload) {
+        Ok(results) => {
+            let mut packed = vec![0u8; results.len().div_ceil(8)];
+            for (index, is_disposable) in results.into_iter().enumerate() {
+                if is_disposable {
+                    packed[index / 8] |= 1 << (index % 8);
+                }
+            }
+            ([(CONTENT_TYPE, "application/octet-stream")], packed).into_response()
+        }
+        Err(error) => error.into_response(),
+    };
+    ([(CACHE_CONTROL, BATCH_CACHE_CONTROL)], response).into_response()
 }
 
 #[cfg(test)]
@@ -423,6 +538,59 @@ mod tests {
         let blocklist = NamedTempFile::new().unwrap();
         std::fs::write(blocklist.path(), "valid.example\nnot a domain\n").unwrap();
         assert!(load_domain_lines(blocklist.path().to_str().unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn compact_verify_returns_one_byte_and_keeps_json_errors() {
+        let domains = DomainSet::from_iter(["disposable.example".to_owned()]);
+        let app = create_app(AppState {
+            domains: Arc::new(ArcSwap::from_pointee(domains)),
+        });
+        for (query, expected) in [
+            ("?domain=Disposable.Example", "1"),
+            ("?domain=other.example", "0"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/domains/verify/compact{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["content-type"],
+                "text/plain; charset=utf-8"
+            );
+            assert_eq!(response.headers()[CACHE_CONTROL], VERIFY_CACHE_CONTROL);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                expected
+            );
+        }
+        for (query, code) in [
+            ("", "INVALID_QUERY_PARAMS"),
+            ("?domain=not%20valid", "INVALID_DOMAIN"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/domains/verify/compact{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let error: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["error_code"], code);
+        }
     }
 
     #[tokio::test]
@@ -613,5 +781,122 @@ mod tests {
         }
         let result = run().await;
         assert!(result.is_ok());
+    }
+
+    async fn post_batch(app: &Router, path: &str, body: String, content_type: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::post(path)
+                    .header(CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn batch_formats_preserve_order_duplicates_and_zero_padding() {
+        let app = benchmark_app_with_domains(["disposable.example".to_owned()]);
+        let domains: Vec<_> = (0..MAX_BATCH_DOMAINS)
+            .map(|index| {
+                if [0, 7, 8, 99].contains(&index) {
+                    "Disposable.Example"
+                } else {
+                    "other.example"
+                }
+            })
+            .collect();
+        let payload = json!({ "domains": domains }).to_string();
+        let expected: Vec<_> = (0..MAX_BATCH_DOMAINS)
+            .map(|index| [0, 7, 8, 99].contains(&index))
+            .collect();
+        for (suffix, content_type) in [
+            ("", "application/json"),
+            ("/compact", "application/octet-stream"),
+        ] {
+            let response = post_batch(
+                &app,
+                &format!("/v1/domains/verify/batch{suffix}"),
+                payload.clone(),
+                "application/json",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CONTENT_TYPE], content_type);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            if suffix.is_empty() {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body).unwrap(),
+                    json!({ "results": expected })
+                );
+            } else {
+                assert_eq!(body.as_ref(), &[0x81, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_formats_reject_invalid_requests_without_partial_results() {
+        let app = benchmark_app_with_domains(["disposable.example".to_owned()]);
+        for path in [
+            "/v1/domains/verify/batch",
+            "/v1/domains/verify/batch/compact",
+        ] {
+            for (body, content_type, status, error_code) in [
+                (
+                    json!({"domains": []}).to_string(),
+                    "application/json",
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_BATCH_SIZE",
+                ),
+                (
+                    json!({"domains": vec!["some.example"; MAX_BATCH_DOMAINS + 1]}).to_string(),
+                    "application/json",
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_BATCH_SIZE",
+                ),
+                (
+                    json!({"domains": ["disposable.example", "a@example.com"]}).to_string(),
+                    "application/json",
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_DOMAIN",
+                ),
+                (
+                    "{".to_owned(),
+                    "application/json",
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_BATCH_BODY",
+                ),
+                (
+                    json!({"domains": [42]}).to_string(),
+                    "application/json",
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "INVALID_BATCH_BODY",
+                ),
+                (
+                    json!({"domains": ["some.example"]}).to_string(),
+                    "text/plain",
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "INVALID_BATCH_BODY",
+                ),
+                (
+                    " ".repeat(MAX_BATCH_BODY_BYTES + 1),
+                    "application/json",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "INVALID_BATCH_BODY",
+                ),
+            ] {
+                let response = post_batch(&app, path, body, content_type).await;
+                assert_eq!(response.status(), status);
+                assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+                assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let error: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(error["error_code"], error_code);
+                assert!(error.get("results").is_none());
+            }
+        }
     }
 }

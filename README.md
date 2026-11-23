@@ -185,8 +185,145 @@ Sample response:
 {
   "domain": "mailinator.com",
   "is_disposable": true,
-  "reason": "Listed as disposable",
-  "source": "blocklist.txt",
+  "source": "assets/blocklist.txt",
   "checked_at": "2025-05-12T09:21:32.796957+00:00"
 }
 ```
+
+For clients that only need the result, use the optional compact endpoint:
+
+```bash
+curl 'http://localhost:9999/v1/domains/verify/compact?domain=mailinator.com'
+```
+
+A successful response is `200 OK` with `Content-Type: text/plain; charset=utf-8`
+and exactly one byte: `1` if the domain is on the disposable blocklist, or `0`
+if it is not. There is no trailing newline. The compact route uses the same
+lookup, validation and cache policy as the JSON route. Invalid requests still
+return `400` with a JSON error, not `0`. Clients should check the HTTP status
+before decoding the body.
+
+### Verify domains in a batch
+
+Send 1–100 hostnames in a JSON body (maximum 32 KiB). Both routes preserve
+input order and duplicates. Send only domains, not full email addresses.
+
+```bash
+curl -fsS 'http://localhost:9999/v1/domains/verify/batch' \
+  -H 'Content-Type: application/json' \
+  --data '{"domains":["mailinator.com","example.com"]}'
+# {"results":[true,false]}
+
+curl -fsS 'http://localhost:9999/v1/domains/verify/batch/compact' \
+  -H 'Content-Type: application/json' \
+  --data '{"domains":["mailinator.com","example.com"]}' | od -An -tx1
+# 01
+```
+
+On success, the compact batch returns `application/octet-stream`, with
+`ceil(n / 8)` bytes for `n` domains. Result `i` (zero-based) uses bit `i % 8`
+in byte `i / 8` (integer division), least-significant bit first. A set bit
+means that the domain is on the blocklist; unused bits are zero. For both
+formats, an invalid hostname rejects the whole batch with `400` and the
+invalid index in the JSON error message; there are no partial results.
+Malformed JSON returns `400`; a body that does not match the JSON schema
+returns `422`; excessive body size returns `413`; a non-JSON content type
+returns `415`. Batch responses use `Cache-Control: no-store`.
+
+An unlisted domain is not proof that a mailbox is permanent or deliverable.
+For signup integration and read-only account audits, see the
+[integration skill](.agents/skills/disposable-domain-integration/SKILL.md).
+
+### Install the integration skill
+
+Use the [`skills` CLI](https://github.com/vercel-labs/skills) with Node.js
+22.20 or later. Run this from the project where you want to use the skill:
+
+```bash
+npx skills add lucaswilliameufrasio/disposable-domain-verifier@4837360354418e0f33d17a9c83b36b57f5894455 \
+  --skill disposable-domain-integration
+```
+
+The commit pin selects the version that contains the skill even before it
+reaches `main`. Choose your agents when prompted, or explicitly select them:
+
+```bash
+npx skills add lucaswilliameufrasio/disposable-domain-verifier@4837360354418e0f33d17a9c83b36b57f5894455 \
+  --skill disposable-domain-integration --agent claude-code codex cursor opencode
+```
+
+Add `--global` to install for your user instead of only the current project.
+Run `npx skills list` (or `npx skills list --global`) and look for
+`disposable-domain-integration`. Agents that discover `.agents/skills/`
+directly can also use the skill from this repository's checkout without an
+install step.
+
+Then ask your agent:
+
+```text
+Use disposable-domain-integration to plan a read-only audit of our signup accounts for disposable email domains.
+```
+
+The skill is guidance only: installing it neither starts the verifier nor
+accesses your database. The batch routes require a server build that includes
+them.
+
+### Reproduce the HTTP benchmark
+
+```bash
+cargo build --locked --release
+python3 scripts/benchmark_verify_batch.py
+```
+
+The script starts a local service and compares four ways to look up the
+same 100 domains. It measures HTTP request and response bytes (including
+headers), and p50/p95 time per group of 100, including client decoding.
+It uses sequential requests with keep-alive on loopback, without TLS, a
+proxy, or HTTP compression. It does not measure production capacity.
+The default loopback is `::1`; pass `--host 127.0.0.1` for IPv4 loopback
+when the local server accepts IPv4 connections.
+
+To measure batch p99 and throughput under concurrent load, build and run
+the verifier locally in one terminal:
+
+```bash
+cargo build --locked --release
+PORT=9999 RUST_LOG=off ./target/release/disposable-domain-verifier
+```
+
+In another terminal, from the repository root:
+
+```bash
+go run scripts/benchmark_verify_load.go -port 9999 -duration 2s -rounds 3
+```
+
+The load generator (Go 1.22+) uses only loopback and checks every result.
+It compares the same proxy path over HTTP/1.1 and HTTPS, using persistent
+connections and closed-loop concurrency of 1, 8, and 32. It reports errors,
+successful batches/s, and p50/p95/p99 in microseconds per batch of 100 domains.
+This does not measure WAN latency, fresh TLS handshakes, or a production
+capacity ceiling. Stop the local verifier when finished.
+
+To isolate the cost of decoding, hostname normalization, and hash lookups:
+
+```bash
+cargo bench --locked --bench verify_lookup -- batch_stages_100
+```
+
+The binary request decoder in this microbenchmark is an experiment only, not
+an API format. Both live batch routes still accept JSON requests.
+
+In one loopback campaign (Ryzen 9 7900, three one-second rounds per scenario,
+four cores for the verifier and eight separate cores for the client/proxy),
+the compact response over HTTPS processed a median of 18,562 batches/s
+with 32 concurrent requests. Its p99 ranged from 3.26 to 13.88 ms across
+rounds; the median p99 was 10.51 ms. All 350,787 measured requests across the
+matrix returned the expected results. The variance is too large to rank
+response formats or claim a capacity ceiling.
+
+In the isolated benchmark, JSON decoding took about 3.74 µs per 100 domains,
+normalization 3.62 µs, and lookup of normalized domains 0.76 µs. The candidate
+length-prefixed decoder took 0.84 µs, excluding normalization and lookup. The
+candidate request body was 1,681 bytes versus 1,894 bytes for JSON in the HTTP
+fixture. These measurements do not establish an end-to-end latency win;
+benchmark under stable load before adding a binary request format.
