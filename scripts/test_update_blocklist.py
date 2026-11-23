@@ -199,6 +199,8 @@ elif endpoint.endswith("/files"):
     print(os.environ.get("ACTUAL_FILES", "assets/blocklist.txt"))
 elif "/contents/" in endpoint:
     print(os.environ.get("ACTUAL_BLOB", "candidate"))
+elif endpoint.endswith("/commits/" + "a" * 40):
+    print(os.environ.get("MERGE_PARENTS", "trusted-base\\nreviewed"))
 elif "/commits/" in endpoint:
     print(os.environ.get("PARENTS", "trusted-base"))
 elif endpoint.endswith("/branches/main"):
@@ -206,7 +208,7 @@ elif endpoint.endswith("/branches/main"):
 elif endpoint.endswith("/pulls/42/merge"):
     assert "PUT" in sys.argv and "sha=reviewed" in sys.argv and "merge_method=merge" in sys.argv
     Path(os.environ["MUTATION_LOG"]).touch()
-    print(os.environ.get("MERGE_RESPONSE", '{"merged":true,"sha":"merge-commit"}'))
+    print(os.environ.get("MERGE_RESPONSE", json.dumps({"merged": True, "sha": "a" * 40})))
 else:
     sys.exit(f"Unexpected endpoint: {endpoint}")
 """)
@@ -224,6 +226,7 @@ else:
                 ({"PARENTS": "trusted-base\nextra-parent"}, False, False),
                 ({"ACTUAL_BASE": "new-base"}, False, False),
                 ({"MERGE_RESPONSE": '{"merged":false}'}, True, False),
+                ({"MERGE_PARENTS": "new-base\nreviewed"}, True, False),
                 ({}, True, True),
             ):
                 with self.subTest(overrides=overrides):

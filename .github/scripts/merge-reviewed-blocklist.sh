@@ -25,5 +25,12 @@ test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$G
 
 # The API checks the head SHA atomically. If the head changed, do not retry
 # with the new head: it needs a fresh validation and review.
-gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/merge" \
-  -f sha="$HEAD_SHA" -f merge_method=merge | jq -e 'select(.merged == true) | {sha, merged}'
+result=$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/merge" \
+  -f sha="$HEAD_SHA" -f merge_method=merge)
+merge_sha=$(jq -er 'select(.merged == true) | .sha | select(test("^[0-9a-f]{40}$"))' <<< "$result")
+merged_parents=$(gh api "repos/$GITHUB_REPOSITORY/commits/$merge_sha" --jq '.parents[].sha')
+if [[ "$merged_parents" != "$GITHUB_SHA"$'\n'"$HEAD_SHA" ]]; then
+  echo "::error::GitHub merged $merge_sha, but its parents do not match the validated base and head. Inspect the merge; no automatic rollback was attempted."
+  exit 1
+fi
+echo "Merged reviewed blocklist: $merge_sha"

@@ -107,7 +107,11 @@ blocklist App merges its own PR only when it changes `assets/blocklist.txt`
 alone and the exact candidate commit passes CI, `blocklist-safety`, and
 Cururu. It rechecks the author, branches, candidate blob, and base revision
 immediately before requesting a normal merge with the reviewed head SHA.
-If anything changes or a gate fails, the PR is left open. This uses the
+If a gate or pre-merge verification fails, the PR is left open. GitHub's
+merge API enforces the head SHA but has no equivalent base SHA precondition.
+The workflow checks the merge commit's parents afterward and alerts if the base
+advanced during the request; it does not automatically revert a merge.
+This uses the
 existing PR-only ruleset exception for the blocklist App; it does not change
 human approval for other PRs or rely on GitHub's native auto-merge setting.
 
